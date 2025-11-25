@@ -37,9 +37,8 @@ def bm83_frame(opcode, params=b"\x00"):
 
 def bm83_read_event(uart, timeout=0.25):
     # Remove or update this line:
-
-# If needed:
-_power_on = True  # or whatever value it should have
+    # If needed:
+    _power_on = True  # or whatever value it should have
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
         b = uart.read(1)
