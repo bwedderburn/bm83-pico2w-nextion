@@ -1,0 +1,25 @@
+# Python/CircuitPython
+__pycache__/
+*.mpy
+.env
+.venv
+*.pyc
+
+# macOS
+.DS_Store
+
+# KiCad 6/7/8/9 noise
+*.kicad_prl
+*-backups/
+*.kicad_sch-bak
+*.kicad_pcb-bak
+fp-info-cache
+sym-lib-table-bak
+*.net
+*.xml
+*.tmp
+*.bak
+
+# Editor junk
+.vscode/
+.idea/
