@@ -124,7 +124,7 @@ def bm83_power_off(u):
     return ok1 and ok2
 
 def bm83_power_toggle(u):
-    global _power_on
+    _power_on
     if _power_on is True:
         if not bm83_power_off(u): bm83_power_on(u); return
     if _power_on is False:
