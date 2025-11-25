@@ -36,7 +36,10 @@ def bm83_frame(opcode, params=b"\x00"):
     return bytes([0xAA, hi, lo]) + payload + bytes([_chk(hi, lo, payload)])
 
 def bm83_read_event(uart, timeout=0.25):
-    global _power_on
+    # Remove or update this line:
+
+# If needed:
+_power_on = True  # or whatever value it should have
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
         b = uart.read(1)
