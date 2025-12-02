@@ -295,8 +295,6 @@ def bm83_vol_relative(uart, up: bool = True) -> None:
 
 
 def volume_bump(uart, up: bool = True) -> None:
-    global _a2dp_level
-
     if up:
         new_level = min(_a2dp_level + 1, A2DP_LEVEL_MAX)
     else:
