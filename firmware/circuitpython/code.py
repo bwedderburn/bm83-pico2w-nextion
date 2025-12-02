@@ -74,8 +74,8 @@ if HAS_HARDWARE:
             print("[WARN] Could not init TX_IND pin:", e)
             _tx_ind = None
 
-    print(f"[BM83] Host UART @ {BM83_BAUD}  TX={BM83_TX} RX={BM83_RX}")
-    print(f"[NX ] UART @ {NX_BAUD}  TX={NX_TX} RX={NX_RX}")
+    print(f"[BM83] Host UART @ {BM83_BAUD}  TX={{BM83_TX}} RX={{BM83_RX}}")
+    print(f"[NX ] UART @ {NX_BAUD}  TX={{NX_TX}} RX={{NX_RX}}")
     print("Ready: VOL↑/VOL↓ = volume, PAIR enters pairing, EQ_* selects preset")
 else:
     BM83_TX = BM83_RX = NX_TX = NX_RX = None
@@ -229,15 +229,15 @@ def bm83_send(
         if etype == "ACK" and eop == opcode:
             if status == 0:
                 if label:
-                    print(f"[ACK {label}] op=0x{opcode:02X} status=0x00")
+                    print(f"[ACK {{label}}] op=0x{{opcode:02X}} status=0x00")
                 return True
             else:
-                print(f"[ACK {label}] op=0x{opcode:02X} status=0x{status:02X}")
+                print(f"[ACK {{label}}] op=0x{{opcode:02X}} status=0x{{status:02X}}")
                 return False
         else:
             print(
-                f"[EVT {label}] type={etype} op=0x{eop:02X} status=0x{status:02X} "
-                f"data={hexdump(raw)}"
+                f"[EVT {{label}}] type={{etype}} op=0x{{eop:02X}} status=0x{{status:02X}} "
+                f"data={{hexdump(raw)}}"
             )
     return False
 
@@ -281,9 +281,9 @@ def bm83_set_a2dp_level(uart, level: int) -> bool:
 
     ok = bm83_send(uart, OP_SET_OVERALL_GAIN, payload, label="A2DP_Gain")
     if ok:
-        print(f"[VOL] A2DP level set to {level}")
+        print(f"[VOL] A2DP level set to {{level}}")
     else:
-        print(f"[VOL] Failed to set A2DP level to {level}")
+        print(f"[VOL] Failed to set A2DP level to {{level}}")
     return ok
 
 
@@ -310,7 +310,7 @@ def bm83_eq_set(uart, mode: int) -> None:
     mode = max(0, min(10, mode))
     payload = bytes([0x07, mode])
     bm83_send(uart, OP_MUSIC_CONTROL, payload, expect_ack=False, label="EQ")
-    print(f"[EQ] Set EQ mode to {mode}")
+    print(f"[EQ] Set EQ mode to {{mode}}")
 
 
 def bm83_play(uart) -> None:
@@ -339,7 +339,7 @@ def bm83_power_toggle(uart) -> None:
     payload = bytes([sub, 0x00])
     bm83_send(uart, OP_MMI_ACTION, payload, expect_ack=False, label="Power")
     _power_on = not _power_on
-    print(f"[POWER] Requested {'ON' if _power_on else 'OFF'}")
+    print(f"[POWER] Requested {{'ON' if _power_on else 'OFF'}}")
 
 
 TOK_BT = [
@@ -420,8 +420,6 @@ _nx_buf = bytearray()
 
 
 def process_nextion_bytes(chunk: bytes) -> None:
-    global _nx_buf
-
     if not chunk:
         return
 
@@ -429,6 +427,7 @@ def process_nextion_bytes(chunk: bytes) -> None:
     if not cleaned:
         return
 
+    # Append incoming bytes to the module buffer (mutate in-place).
     _nx_buf.extend(cleaned)
 
     while True:
@@ -437,7 +436,10 @@ def process_nextion_bytes(chunk: bytes) -> None:
             break
 
         frame = bytes(_nx_buf[:idx])
-        _nx_buf = _nx_buf[idx + len(TERM) :]
+        # Remove the processed frame + terminator from the left of the buffer
+        # by deleting the slice in-place. This avoids rebinding `_nx_buf`
+        # (no need for a `global` declaration) and keeps the buffer object.
+        del _nx_buf[: idx + len(TERM)]
 
         if not frame:
             continue
@@ -462,7 +464,7 @@ def process_nextion_bytes(chunk: bytes) -> None:
 def run_mmi_probe_cycle(uart) -> None:
     print("[MMI] Starting volume probe cycle…")
     for i, (up_id, dn_id) in enumerate(_CAND_MMI_VOL):
-        print(f"[MMI] Candidate {i}: Vol+ 0x{up_id:02X}, Vol- 0x{dn_id:02X}")
+        print(f"[MMI] Candidate {{i}}: Vol+ 0x{{up_id:02X}}, Vol- 0x{{dn_id:02X}}")
         uart.write(bm83_frame(OP_MMI_ACTION, bytes([up_id, 0x00])))
         time.sleep(0.2)
         uart.write(bm83_frame(OP_MMI_ACTION, bytes([dn_id, 0x00])))
@@ -493,8 +495,8 @@ if HAS_HARDWARE:
             interesting = {0x00, 0x10, 0x1A, 0x1B, 0x20, 0x2D}
             if op in interesting or (now - _last_evt_print) > 1.0:
                 print(
-                    f"[BM83 EVT] type={etype} op=0x{op:02X} status=0x{status:02X} "
-                    f"data={hexdump(data)}"
+                    f"[BM83 EVT] type={{etype}} op=0x{{op:02X}} status=0x{{status:02X}} "
+                    f"data={{hexdump(data)}}"
                 )
                 _last_evt_print = now
 
