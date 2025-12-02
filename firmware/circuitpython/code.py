@@ -1,4 +1,4 @@
-# code.py — BM83 + Pico 2 W + Nextion (baseline)
+# code.py — BM83 + Pico 2 W + Nextion (GPIO volume + EQ indication)
 
 from __future__ import annotations
 
@@ -40,6 +40,14 @@ def hexdump(data: bytes, width: int = 16) -> str:
 BM83_BAUD = 115200
 NX_BAUD = 9600
 
+# Globals for hardware objects
+nextion = None
+bm83 = None
+_tx_ind = None
+_prev_tx_ind = None
+vol_up_pin = None
+vol_dn_pin = None
+
 if HAS_HARDWARE:
     BM83_TX = board.GP12
     BM83_RX = board.GP13
@@ -63,20 +71,36 @@ if HAS_HARDWARE:
         receiver_buffer_size=256,
     )
 
-    _tx_ind = None
-    _prev_tx_ind = None
-    if TX_IND_PIN is not None:
-        try:
+    # Optional BM83 TX_IND input
+    try:
+        if TX_IND_PIN is not None:
             _tx_ind = digitalio.DigitalInOut(TX_IND_PIN)
             _tx_ind.switch_to_input()
             _prev_tx_ind = _tx_ind.value
-        except Exception as e:  # pragma: no cover
-            print("[WARN] Could not init TX_IND pin:", e)
-            _tx_ind = None
+    except Exception as e:  # pragma: no cover
+        print("[WARN] Could not init TX_IND pin:", e)
+        _tx_ind = None
+        _prev_tx_ind = None
 
-    print(f"[BM83] Host UART @ {BM83_BAUD}  TX={{BM83_TX}} RX={{BM83_RX}}")
-    print(f"[NX ] UART @ {NX_BAUD}  TX={{NX_TX}} RX={{NX_RX}}")
-    print("Ready: VOL↑/VOL↓ = volume, PAIR enters pairing, EQ_* selects preset")
+    # Volume GPIOs: Pico → BM83 VOL+ / VOL– key inputs (active-low)
+    try:
+        vol_up_pin = digitalio.DigitalInOut(board.GP16)
+        vol_up_pin.direction = digitalio.Direction.OUTPUT
+        vol_up_pin.value = True  # idle high = not pressed
+
+        vol_dn_pin = digitalio.DigitalInOut(board.GP17)
+        vol_dn_pin.direction = digitalio.Direction.OUTPUT
+        vol_dn_pin.value = True  # idle high = not pressed
+
+        print("[VOL GPIO] GP16 → BM83 VOL+, GP17 → BM83 VOL- (active-low)")
+    except Exception as e:
+        print("[WARN] Could not init volume GPIOs:", e)
+        vol_up_pin = None
+        vol_dn_pin = None
+
+    print(f"[BM83] Host UART @ {BM83_BAUD}  TX={BM83_TX} RX={BM83_RX}")
+    print(f"[NX ] UART @ {NX_BAUD}  TX={NX_TX} RX={NX_RX}")
+    print("Ready: VOL↑/VOL↓ via GPIO, PAIR enters pairing, EQ_* selects preset")
 else:
     BM83_TX = BM83_RX = NX_TX = NX_RX = None
     TX_IND_PIN = None
@@ -84,21 +108,28 @@ else:
     bm83 = _DummyUART()
     _tx_ind = None
     _prev_tx_ind = None
+    vol_up_pin = None
+    vol_dn_pin = None
     print("[WARN] Running in dummy mode (no hardware).")
 
 
 _power_on = False
 
+# ---- UART opcodes (from Audio UART Command Set) ----
 OP_READ_BD_ADDR = 0x0F
 OP_EVENT_MASK = 0x03
 OP_BTM_UTILITY_FUNC = 0x13
 OP_MMI_ACTION = 0x02
-OP_MUSIC_CONTROL = 0x1C
+OP_MUSIC_CONTROL = 0x04        # Music_Control (0x04)
+OP_EQ_MODE_SETTING = 0x1C      # EQ_Mode_Setting (0x1C)
 OP_SET_OVERALL_GAIN = 0x23
 
+# Events
 EVT_PKT_ACK = 0x00
 EVT_CONNECTION_STATUS = 0x01
+EVT_EQ_MODE_INDICATION = 0x10  # EQ_Mode_Indication event
 
+# MMI actions
 MMI_POWER_ON = 0x01
 MMI_POWER_OFF = 0x02
 MMI_PAIRING = 0x04
@@ -108,6 +139,7 @@ MMI_PREV = 0x0E
 MMI_VOL_UP = 0x05
 MMI_VOL_DN = 0x06
 
+# Candidate MMI IDs for volume (kept for reference / future experiments)
 _CAND_MMI_VOL = [
     (0x05, 0x06),
     (0x45, 0x46),
@@ -120,6 +152,7 @@ A2DP_LEVEL_MIN = 0
 A2DP_LEVEL_MAX = 15
 _a2dp_level = 8
 
+# ---- EQ mapping & state ----
 EQ_MAP = {
     b"EQ_OFF": 0,
     b"EQ_SOFT": 1,
@@ -134,6 +167,46 @@ EQ_MAP = {
     b"EQ_USER": 10,
 }
 
+EQ_LABELS = {
+    0: "OFF",
+    1: "SOFT",
+    2: "BASS",
+    3: "TREBLE",
+    4: "CLASSICAL",
+    5: "ROCK",
+    6: "JAZZ",
+    7: "POP",
+    8: "DANCE",
+    9: "RNB",
+    10: "USER",
+}
+
+_current_eq_mode = 0  # track what we think the EQ mode is
+
+
+# ---- Nextion helpers for EQ indication ----
+
+def nx_send_cmd(cmd: str) -> None:
+    """Send a raw Nextion command with 0xFF 0xFF 0xFF terminator."""
+    data = cmd.encode("ascii", "replace") + b"\xFF\xFF\xFF"
+    try:
+        nextion.write(data)
+    except Exception as e:
+        print("[NX] UART write error:", e)
+
+
+def nx_set_eq_label(mode: int) -> None:
+    """Update a text field on the Nextion to show EQ mode.
+
+    Assumes a component named 'tEQ' exists. Adjust name if needed.
+    """
+    label = EQ_LABELS.get(mode, f"EQ{mode}")
+    print(f"[EQ] Mode {mode} ({label})")
+    # If you use a different component name, change 'tEQ' here:
+    nx_send_cmd(f'tEQ.txt="{label}"')
+
+
+# ---- BM83 framing / event handling ----
 
 def bm83_frame(opcode: int, payload: bytes = b"") -> bytes:
     plen = 1 + len(payload)
@@ -229,15 +302,15 @@ def bm83_send(
         if etype == "ACK" and eop == opcode:
             if status == 0:
                 if label:
-                    print(f"[ACK {{label}}] op=0x{{opcode:02X}} status=0x00")
+                    print(f"[ACK {label}] op=0x{opcode:02X} status=0x00")
                 return True
             else:
-                print(f"[ACK {{label}}] op=0x{{opcode:02X}} status=0x{{status:02X}}")
+                print(f"[ACK {label}] op=0x{opcode:02X} status=0x{status:02X}")
                 return False
         else:
             print(
-                f"[EVT {{label}}] type={{etype}} op=0x{{eop:02X}} status=0x{{status:02X}} "
-                f"data={{hexdump(raw)}}"
+                f"[EVT {label}] type={etype} op=0x{eop:02X} status=0x{status:02X} "
+                f"data={hexdump(raw)}"
             )
     return False
 
@@ -247,6 +320,7 @@ def bm83_read_bd_addr(uart) -> None:
 
 
 def bm83_unmask_all(uart) -> None:
+    # Enable all events (including EQ_Mode_Indication 0x10)
     mask = bytes([0xFF] * 8)
     bm83_send(uart, OP_EVENT_MASK, mask, label="EvtMask")
 
@@ -256,6 +330,8 @@ def bm83_connectable(uart, enable: bool = True) -> None:
     payload = bytes([0x0E, mode])
     bm83_send(uart, OP_BTM_UTILITY_FUNC, payload, label="Connectable")
 
+
+# ---- (optional) overall gain helpers; left in place but not used for UI volume ----
 
 def bm83_set_a2dp_level(uart, level: int) -> bool:
     global _a2dp_level
@@ -281,20 +357,14 @@ def bm83_set_a2dp_level(uart, level: int) -> bool:
 
     ok = bm83_send(uart, OP_SET_OVERALL_GAIN, payload, label="A2DP_Gain")
     if ok:
-        print(f"[VOL] A2DP level set to {{level}}")
+        print(f"[VOL] A2DP level set to {level}")
     else:
-        print(f"[VOL] Failed to set A2DP level to {{level}}")
+        print(f"[VOL] Failed to set A2DP level to {level}")
     return ok
 
 
-def bm83_vol_relative(uart, up: bool = True) -> None:
-    up_id, dn_id = _CAND_MMI_VOL[0]
-    sub = up_id if up else dn_id
-    payload = bytes([sub, 0x00])
-    bm83_send(uart, OP_MMI_ACTION, payload, expect_ack=False, label="VolRel")
-
-
 def volume_bump(uart, up: bool = True) -> None:
+    # kept for potential CLI / debug use; UI volume now via GPIO keys
     if up:
         new_level = min(_a2dp_level + 1, A2DP_LEVEL_MAX)
     else:
@@ -306,25 +376,58 @@ def volume_bump(uart, up: bool = True) -> None:
     bm83_set_a2dp_level(uart, new_level)
 
 
-def bm83_eq_set(uart, mode: int) -> None:
-    mode = max(0, min(10, mode))
-    payload = bytes([0x07, mode])
-    bm83_send(uart, OP_MUSIC_CONTROL, payload, expect_ack=False, label="EQ")
-    print(f"[EQ] Set EQ mode to {{mode}}")
+# ---- GPIO-based volume control (GP16/GP17) ----
 
+def bm83_gpio_volume(up: bool) -> None:
+    """Use Pico GPIOs wired to BM83 VOL+/VOL– key inputs (active-low)
+    instead of UART volume commands."""
+    if not HAS_HARDWARE:
+        print(f"[VOL GPIO] {'UP' if up else 'DN'} (dummy)")
+        return
+
+    pin = vol_up_pin if up else vol_dn_pin
+    if pin is None:
+        print("[VOL GPIO] Pin not configured")
+        return
+
+    # active-low momentary press
+    pin.value = False
+    time.sleep(0.08)
+    pin.value = True
+    print(f"[VOL GPIO] {'VOL+' if up else 'VOL-'} pulse sent")
+
+
+# ---- EQ commands ----
+
+def bm83_eq_set(uart, mode: int) -> None:
+    """Set EQ mode via EQ_Mode_Setting (0x1C) and update indicator."""
+    global _current_eq_mode
+    mode = max(0, min(10, mode))
+    _current_eq_mode = mode
+
+    # Per spec: EQ_Mode_Setting 0x1C, payload [EQ_Mode, Reserved]
+    payload = bytes([mode, 0x00])
+    bm83_send(uart, OP_EQ_MODE_SETTING, payload, expect_ack=False, label="EQ")
+    nx_set_eq_label(mode)
+
+
+# ---- Music control (play / next / prev) via Music_Control (0x04) ----
 
 def bm83_play(uart) -> None:
-    payload = bytes([0x01, 0x00])
+    # Music_Control 0x04, Reserved=0x00, Action=0x01 (Play/Pause toggle)
+    payload = bytes([0x00, 0x01])
     bm83_send(uart, OP_MUSIC_CONTROL, payload, expect_ack=False, label="Play/Pause")
 
 
 def bm83_next(uart) -> None:
-    payload = bytes([0x02, 0x00])
+    # Music_Control 0x04, Action=0x02 (Next)
+    payload = bytes([0x00, 0x02])
     bm83_send(uart, OP_MUSIC_CONTROL, payload, expect_ack=False, label="Next")
 
 
 def bm83_prev(uart) -> None:
-    payload = bytes([0x03, 0x00])
+    # Music_Control 0x04, Action=0x03 (Previous)
+    payload = bytes([0x00, 0x03])
     bm83_send(uart, OP_MUSIC_CONTROL, payload, expect_ack=False, label="Prev")
 
 
@@ -339,8 +442,10 @@ def bm83_power_toggle(uart) -> None:
     payload = bytes([sub, 0x00])
     bm83_send(uart, OP_MMI_ACTION, payload, expect_ack=False, label="Power")
     _power_on = not _power_on
-    print(f"[POWER] Requested {{'ON' if _power_on else 'OFF'}}")
+    print(f"[POWER] Requested {'ON' if _power_on else 'OFF'}")
 
+
+# ---- Nextion token handling ----
 
 TOK_BT = [
     b"BT_POWER",
@@ -352,19 +457,7 @@ TOK_BT = [
     b"BT_VOLDN",
 ]
 
-TOK_EQ = [
-    b"EQ_OFF",
-    b"EQ_SOFT",
-    b"EQ_BASS",
-    b"EQ_TREBLE",
-    b"EQ_CLASSICAL",
-    b"EQ_ROCK",
-    b"EQ_JAZZ",
-    b"EQ_POP",
-    b"EQ_DANCE",
-    b"EQ_RNB",
-    b"EQ_USER",
-]
+TOK_EQ = list(EQ_MAP.keys())
 
 TOKENS = TOK_BT + TOK_EQ
 
@@ -402,10 +495,14 @@ def handle_token(msg: bytes) -> None:
         bm83_next(bm83)
     elif m == b"BT_PREV":
         bm83_prev(bm83)
+
+    # ---- volume via GPIO only ----
     elif m == b"BT_VOLUP":
-        volume_bump(bm83, up=True)
+        bm83_gpio_volume(True)
     elif m == b"BT_VOLDN":
-        volume_bump(bm83, up=False)
+        bm83_gpio_volume(False)
+
+    # ---- EQ selection ----
     elif m in TOK_EQ:
         mode = EQ_MAP.get(m, 0)
         bm83_eq_set(bm83, mode)
@@ -427,7 +524,6 @@ def process_nextion_bytes(chunk: bytes) -> None:
     if not cleaned:
         return
 
-    # Append incoming bytes to the module buffer (mutate in-place).
     _nx_buf.extend(cleaned)
 
     while True:
@@ -436,9 +532,6 @@ def process_nextion_bytes(chunk: bytes) -> None:
             break
 
         frame = bytes(_nx_buf[:idx])
-        # Remove the processed frame + terminator from the left of the buffer
-        # by deleting the slice in-place. This avoids rebinding `_nx_buf`
-        # (no need for a `global` declaration) and keeps the buffer object.
         del _nx_buf[: idx + len(TERM)]
 
         if not frame:
@@ -464,7 +557,7 @@ def process_nextion_bytes(chunk: bytes) -> None:
 def run_mmi_probe_cycle(uart) -> None:
     print("[MMI] Starting volume probe cycle…")
     for i, (up_id, dn_id) in enumerate(_CAND_MMI_VOL):
-        print(f"[MMI] Candidate {{i}}: Vol+ 0x{{up_id:02X}}, Vol- 0x{{dn_id:02X}}")
+        print(f"[MMI] Candidate {i}: Vol+ 0x{up_id:02X}, Vol- 0x{dn_id:02X}")
         uart.write(bm83_frame(OP_MMI_ACTION, bytes([up_id, 0x00])))
         time.sleep(0.2)
         uart.write(bm83_frame(OP_MMI_ACTION, bytes([dn_id, 0x00])))
@@ -492,11 +585,19 @@ if HAS_HARDWARE:
         evt = bm83_read_event(bm83, timeout=0.01)
         if evt:
             etype, op, status, data = evt
+
+            # Hook EQ_Mode_Indication: op=0x10, status = EQ_Mode per spec
+            if op == EVT_EQ_MODE_INDICATION:
+                # status byte is EQ_Mode, params[0] is Reserved
+                mode = status
+                if 0x00 <= mode <= 0x0A:
+                    nx_set_eq_label(mode)
+
             interesting = {0x00, 0x10, 0x1A, 0x1B, 0x20, 0x2D}
             if op in interesting or (now - _last_evt_print) > 1.0:
                 print(
-                    f"[BM83 EVT] type={{etype}} op=0x{{op:02X}} status=0x{{status:02X}} "
-                    f"data={{hexdump(data)}}"
+                    f"[BM83 EVT] type={etype} op=0x{op:02X} status=0x{status:02X} "
+                    f"data={hexdump(data)}"
                 )
                 _last_evt_print = now
 
@@ -520,6 +621,7 @@ else:
     print("[INFO] Hardware modules not found; main loop disabled.")
 
 
+# Self-tests (never run in normal operation)
 if False:
     assert _ascii_upper_uscore(b"BT_PLAY")
     assert _ascii_upper_uscore(b"EQ_CLASSICAL")
