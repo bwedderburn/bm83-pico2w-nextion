@@ -401,8 +401,6 @@ def volume_bump(uart, up: bool = True) -> None:
     behaves as a BM83-side master/trim so you can keep the amp in a
     safe range regardless of handset level.
     """
-    global _a2dp_level
-
     if up:
         new_level = min(_a2dp_level + 1, A2DP_LEVEL_MAX)
     else:
@@ -569,8 +567,6 @@ def process_nextion_bytes(chunk: bytes) -> None:
     This function appends to a rolling buffer, splits by 0xFF 0xFF 0xFF,
     filters boot noise, then calls handle_token() for recognized tokens.
     """
-    global _nx_buf
-
     if not chunk:
         return
 
