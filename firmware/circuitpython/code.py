@@ -1,30 +1,12 @@
-# code.py — BM83 + Pico 2 W + Nextion (GPIO volume + EQ indication)
+# code.py — BM83 + Pico 2 W + Nextion (BM83 control + AVRCP metadata + EQ via Vol±)
 
 from __future__ import annotations
 
 import time
 
-try:
-    import board
-    import busio
-    import digitalio
-
-    HAS_HARDWARE = True
-except ImportError:
-    board = None  # type: ignore
-    busio = None  # type: ignore
-    digitalio = None  # type: ignore
-    HAS_HARDWARE = False
-
-    class _DummyUART:
-        def __init__(self, *_, **__):
-            self._buf = b""
-
-        def write(self, data: bytes) -> None:
-            print("[DUMMY UART write]", data)
-
-        def read(self, n: int = 1) -> bytes:
-            return b""
+import board
+import busio
+import digitalio
 
 
 def hexdump(data: bytes, width: int = 16) -> str:
@@ -40,77 +22,26 @@ def hexdump(data: bytes, width: int = 16) -> str:
 BM83_BAUD = 115200
 NX_BAUD = 9600
 
-# Globals for hardware objects
-nextion = None
-bm83 = None
-_tx_ind = None
-_prev_tx_ind = None
-vol_up_pin = None
-vol_dn_pin = None
+BM83_TX = board.GP12
+BM83_RX = board.GP13
+NX_TX = board.GP8
+NX_RX = board.GP9
 
-if HAS_HARDWARE:
-    BM83_TX = board.GP12
-    BM83_RX = board.GP13
-    NX_TX = board.GP8
-    NX_RX = board.GP9
-    TX_IND_PIN = getattr(board, "GP22", None)
+nextion = busio.UART(
+    NX_TX,
+    NX_RX,
+    baudrate=NX_BAUD,
+    timeout=0.01,
+    receiver_buffer_size=128,
+)
 
-    nextion = busio.UART(
-        NX_TX,
-        NX_RX,
-        baudrate=NX_BAUD,
-        timeout=0.01,
-        receiver_buffer_size=128,
-    )
-
-    bm83 = busio.UART(
-        BM83_TX,
-        BM83_RX,
-        baudrate=BM83_BAUD,
-        timeout=0.02,
-        receiver_buffer_size=256,
-    )
-
-    # Optional BM83 TX_IND input
-    try:
-        if TX_IND_PIN is not None:
-            _tx_ind = digitalio.DigitalInOut(TX_IND_PIN)
-            _tx_ind.switch_to_input()
-            _prev_tx_ind = _tx_ind.value
-    except Exception as e:  # pragma: no cover
-        print("[WARN] Could not init TX_IND pin:", e)
-        _tx_ind = None
-        _prev_tx_ind = None
-
-    # Volume GPIOs: Pico → BM83 VOL+ / VOL– key inputs (active-low)
-    try:
-        vol_up_pin = digitalio.DigitalInOut(board.GP16)
-        vol_up_pin.direction = digitalio.Direction.OUTPUT
-        vol_up_pin.value = True  # idle high = not pressed
-
-        vol_dn_pin = digitalio.DigitalInOut(board.GP17)
-        vol_dn_pin.direction = digitalio.Direction.OUTPUT
-        vol_dn_pin.value = True  # idle high = not pressed
-
-        print("[VOL GPIO] GP16 → BM83 VOL+, GP17 → BM83 VOL- (active-low)")
-    except Exception as e:
-        print("[WARN] Could not init volume GPIOs:", e)
-        vol_up_pin = None
-        vol_dn_pin = None
-
-    print(f"[BM83] Host UART @ {BM83_BAUD}  TX={BM83_TX} RX={BM83_RX}")
-    print(f"[NX ] UART @ {NX_BAUD}  TX={NX_TX} RX={NX_RX}")
-    print("Ready: VOL↑/VOL↓ via GPIO, PAIR enters pairing, EQ_* selects preset")
-else:
-    BM83_TX = BM83_RX = NX_TX = NX_RX = None
-    TX_IND_PIN = None
-    nextion = _DummyUART()
-    bm83 = _DummyUART()
-    _tx_ind = None
-    _prev_tx_ind = None
-    vol_up_pin = None
-    vol_dn_pin = None
-    print("[WARN] Running in dummy mode (no hardware).")
+bm83 = busio.UART(
+    BM83_TX,
+    BM83_RX,
+    baudrate=BM83_BAUD,
+    timeout=0.02,
+    receiver_buffer_size=256,
+)
 
 
 _power_on = False
@@ -123,34 +54,38 @@ OP_MMI_ACTION = 0x02
 OP_MUSIC_CONTROL = 0x04        # Music_Control (0x04)
 OP_EQ_MODE_SETTING = 0x1C      # EQ_Mode_Setting (0x1C)
 OP_SET_OVERALL_GAIN = 0x23
+OP_AVRCP_SPECIFIC = 0x0B       # AVRCP Specific Command (0x0B)
 
 # Events
 EVT_PKT_ACK = 0x00
 EVT_CONNECTION_STATUS = 0x01
-EVT_EQ_MODE_INDICATION = 0x10  # EQ_Mode_Indication event
+EVT_EQ_MODE_INDICATION = 0x10  # (ignored; we drive EQ from UI)
 
-# MMI actions
-MMI_POWER_ON = 0x01
-MMI_POWER_OFF = 0x02
-MMI_PAIRING = 0x04
-MMI_PLAY_PAUSE = 0x0C
-MMI_NEXT = 0x0D
-MMI_PREV = 0x0E
-MMI_VOL_UP = 0x05
-MMI_VOL_DN = 0x06
+# Music control sub-codes (for OP_MUSIC_CONTROL 0x04)
+MC_PLAY_PAUSE = 0x07
+MC_NEXT       = 0x09
+MC_PREV       = 0x0A
 
-# Candidate MMI IDs for volume (kept for reference / future experiments)
-_CAND_MMI_VOL = [
-    (0x05, 0x06),
-    (0x45, 0x46),
-    (0x55, 0x56),
-]
+# MMI actions for power / pairing (press/release style)
+MMI_POWER_ON_PRESS    = 0x51
+MMI_POWER_ON_RELEASE  = 0x52
+MMI_POWER_OFF_PRESS   = 0x53
+MMI_POWER_OFF_RELEASE = 0x54
+MMI_ENTER_PAIRING     = 0x5D
 
-AUTO_MMI_PROBE = False
+# AVRCP / metadata
+PDU_GET_ELEMENT_ATTRIBUTES = 0x20  # Get Element Attributes (all info)
 
-A2DP_LEVEL_MIN = 0
-A2DP_LEVEL_MAX = 15
-_a2dp_level = 8
+# Poll metadata more aggressively now that fluff is removed
+META_POLL_INTERVAL = 1.0  # seconds (was ~2.5)
+
+# ---- Track timing / live position state ----
+_current_track_ms = 0          # total track length from metadata (ms)
+_current_pos_ms = 0            # accumulated position when paused (ms)
+_pos_start_monotonic = None    # monotonic() timestamp when last started
+_is_playing = False            # our best guess of play/pause state
+_last_timecur_update = 0.0     # last time we pushed tTIME_CUR
+_last_meta_key = None          # (title, artist, album, raw_time) for track-change detection
 
 # ---- EQ mapping & state ----
 EQ_MAP = {
@@ -184,7 +119,7 @@ EQ_LABELS = {
 _current_eq_mode = 0  # track what we think the EQ mode is
 
 
-# ---- Nextion helpers for EQ indication ----
+# ---- Nextion helpers ----
 
 def nx_send_cmd(cmd: str) -> None:
     """Send a raw Nextion command with 0xFF 0xFF 0xFF terminator."""
@@ -196,32 +131,125 @@ def nx_send_cmd(cmd: str) -> None:
 
 
 def nx_set_eq_label(mode: int) -> None:
-    """Update a text field on the Nextion to show EQ mode.
+    """Update EQ labels on one or more Nextion pages.
 
-    Assumes a component named 'tEQ' exists. Adjust name if needed.
+    We keep the same naming as before so EQ feedback wiring remains
+    unchanged. You can have any subset of these in the HMI:
+      - tEQ0  (e.g. main music page)
+      - tEQ1  (legacy; safe if removed)
+      - tEQ2  (another page if desired)
     """
     label = EQ_LABELS.get(mode, f"EQ{mode}")
     print(f"[EQ] Mode {mode} ({label})")
-    # If you use a different component name, change 'tEQ' here:
-    nx_send_cmd(f'tEQ.txt="{label}"')
+
+    targets = ["tEQ0", "tEQ1", "tEQ2"]
+    for name in targets:
+        nx_send_cmd(f'{name}.txt="{label}"')
+
+
+def _nx_safe_text(s: str, max_len: int = 40) -> str:
+    """Sanitize text for Nextion (strip CR/LF/quotes, limit length)."""
+    s = s.replace("\r", " ").replace("\n", " ")
+    s = s.replace('"', "'")
+    if len(s) > max_len:
+        s = s[: max_len - 1] + "…"
+    return s
+
+
+def _format_ms_as_min_sec(ms: int) -> str:
+    """Format milliseconds as 'Xm Ys'."""
+    if ms < 0:
+        ms = 0
+    total_secs = ms // 1000
+    minutes = total_secs // 60
+    seconds = total_secs % 60
+    return f"{minutes}m {seconds}s"
+
+
+def nx_update_current_time(ms: int) -> None:
+    """Update live playback position text field tTIME_CUR."""
+    txt = _format_ms_as_min_sec(ms)
+    nx_send_cmd(f'tTIME_CUR.txt="{txt}"')
+
+
+def nx_update_metadata(meta: dict) -> None:
+    """Push AVRCP metadata dict to Nextion text fields.
+
+    Expects component names:
+      - tTitle
+      - tArtist
+      - tAlbum
+      - tGenre
+      - tTime     (total track time)
+      - tTIME_CUR (live position, updated elsewhere)
+
+    We only reset the live timer when we detect a *track change* based on a
+    key of (title, artist, album, raw_time). This avoids the current time
+    jumping back to 0 on every periodic metadata poll.
+    """
+    global _current_track_ms, _current_pos_ms, _pos_start_monotonic
+    global _is_playing, _last_meta_key
+
+    try:
+        title = _nx_safe_text(meta.get(1, ""))
+        artist = _nx_safe_text(meta.get(2, ""))
+        album = _nx_safe_text(meta.get(3, ""))
+        genre = _nx_safe_text(meta.get(6, ""))
+
+        raw_time = meta.get(7, "")  # usually milliseconds string
+        track_key = (title, artist, album, str(raw_time))
+
+        ms_value = None
+        ptime = ""
+        if raw_time:
+            try:
+                ms_value = int(str(raw_time).strip())
+                ptime = _format_ms_as_min_sec(ms_value)
+            except Exception:
+                # If it isn't an integer, just show it as text
+                ptime = _nx_safe_text(str(raw_time))
+
+        if title:
+            nx_send_cmd(f'tTitle.txt="{title}"')
+        if artist:
+            nx_send_cmd(f'tArtist.txt="{artist}"')
+        if album:
+            nx_send_cmd(f'tAlbum.txt="{album}"')
+        if genre:
+            nx_send_cmd(f'tGenre.txt="{genre}"')
+        if ptime:
+            nx_send_cmd(f'tTime.txt="{ptime}"')
+            if isinstance(ms_value, int):
+                _current_track_ms = ms_value
+
+        # Only when the track key changes do we reset the live timer to 0.
+        if _last_meta_key != track_key:
+            _last_meta_key = track_key
+            _current_pos_ms = 0
+            _pos_start_monotonic = time.monotonic() if _is_playing else None
+            nx_update_current_time(0)
+
+    except Exception as e:
+        print("[NX] Metadata update error:", e)
 
 
 # ---- BM83 framing / event handling ----
 
 def bm83_frame(opcode: int, payload: bytes = b"") -> bytes:
+    """Build a BM83 UART frame.
+
+    Checksum is the 2's complement of (len_hi + len_lo + opcode + params).
+    """
     plen = 1 + len(payload)
     hi = (plen >> 8) & 0xFF
     lo = plen & 0xFF
     body = bytes([opcode]) + payload
-    s = sum(body) & 0xFF
+    s = (hi + lo + sum(body)) & 0xFF
     chk = (-s) & 0xFF
     return bytes([0xAA, hi, lo]) + body + bytes([chk])
 
 
 def bm83_read_event(uart, timeout: float = 0.01):
-    if not HAS_HARDWARE:
-        return None
-
     end_time = time.monotonic() + timeout
     while time.monotonic() < end_time:
         b = uart.read(1)
@@ -243,7 +271,8 @@ def bm83_read_event(uart, timeout: float = 0.01):
         payload = body[:-1]
         chk = body[-1]
 
-        s = sum(payload) & 0xFF
+        # BM83 checksum covers len_hi + len_lo + opcode + params
+        s = (hi + lo + sum(payload)) & 0xFF
         if ((s + chk) & 0xFF) != 0:
             print("[BM83] Bad checksum in event:", hexdump(b + hdr + body))
             return None
@@ -288,8 +317,6 @@ def bm83_send(
     frame = bm83_frame(opcode, payload)
     uart.write(frame)
 
-    if not HAS_HARDWARE:
-        return True
     if not expect_ack:
         return True
 
@@ -320,81 +347,67 @@ def bm83_read_bd_addr(uart) -> None:
 
 
 def bm83_unmask_all(uart) -> None:
-    # Enable all events (including EQ_Mode_Indication 0x10)
-    mask = bytes([0xFF] * 8)
+    """Enable standard event reporting (4-byte 0x00 mask)."""
+    mask = bytes([0x00, 0x00, 0x00, 0x00])
     bm83_send(uart, OP_EVENT_MASK, mask, label="EvtMask")
 
 
 def bm83_connectable(uart, enable: bool = True) -> None:
-    mode = 0x01 if enable else 0x00
-    payload = bytes([0x0E, mode])
+    """Put BM83 into connectable / non-connectable mode."""
+    payload = bytes([0x03, 0x01 if enable else 0x00])
     bm83_send(uart, OP_BTM_UTILITY_FUNC, payload, label="Connectable")
 
 
-# ---- (optional) overall gain helpers; left in place but not used for UI volume ----
+# ---- AVRCP metadata helpers ----
 
-def bm83_set_a2dp_level(uart, level: int) -> bool:
-    global _a2dp_level
-
-    level = max(A2DP_LEVEL_MIN, min(A2DP_LEVEL_MAX, int(level)))
-    _a2dp_level = level
-
-    data_base_index = 0x00
-    mask = 0b00000001
-    type_ = 0x03
-    gain_a2dp = level
-    gain_hf = 0x00
-    gain_line_in = 0x00
-
-    payload = bytes([
-        data_base_index,
-        mask,
-        type_,
-        gain_a2dp,
-        gain_hf,
-        gain_line_in,
-    ])
-
-    ok = bm83_send(uart, OP_SET_OVERALL_GAIN, payload, label="A2DP_Gain")
-    if ok:
-        print(f"[VOL] A2DP level set to {level}")
-    else:
-        print(f"[VOL] Failed to set A2DP level to {level}")
-    return ok
+def bm83_request_metadata(uart) -> None:
+    """Request AVRCP 'all information of the media' for current track."""
+    payload = b"\x00\x20\x00\x00\x0D" + (b"\x00" * 13)
+    bm83_send(uart, OP_AVRCP_SPECIFIC, payload,
+              expect_ack=True, label="AVRCP_GetMeta")
 
 
-def volume_bump(uart, up: bool = True) -> None:
-    # kept for potential CLI / debug use; UI volume now via GPIO keys
-    if up:
-        new_level = min(_a2dp_level + 1, A2DP_LEVEL_MAX)
-    else:
-        new_level = max(_a2dp_level - 1, A2DP_LEVEL_MIN)
-
-    if new_level == _a2dp_level:
-        return
-
-    bm83_set_a2dp_level(uart, new_level)
-
-
-# ---- GPIO-based volume control (GP16/GP17) ----
-
-def bm83_gpio_volume(up: bool) -> None:
-    """Use Pico GPIOs wired to BM83 VOL+/VOL– key inputs (active-low)
-    instead of UART volume commands."""
-    if not HAS_HARDWARE:
-        print(f"[VOL GPIO] {'UP' if up else 'DN'} (dummy)")
-        return
-
-    pin = vol_up_pin if up else vol_dn_pin
-    if pin is None:
-        print("[VOL GPIO] Pin not configured")
-        return
-
-    # active-low momentary press
-    pin.value = False
-    time.sleep(0.08)
-    pin.value = True
-    print(f"[VOL GPIO] {'VOL+' if up else 'VOL-'} pulse sent")
+def _parse_avrcp_metadata_block(data: bytes) -> dict:
+    """Parse AVRCP GetElementAttributes response into {attr_id: text}."""
+    meta: dict[int, str] = {}
+    n = len(data)
+    i = 0
+    while i + 8 <= n:
+        if not (data[i] == 0x00 and data[i + 1] == 0x00 and data[i + 2] == 0x00):
+            i += 1
+            continue
+        attr_id = data[i + 3]
+        if not (1 <= attr_id <= 7):
+            i += 1
+            continue
+        if i + 8 > n:
+            break
+        # charset = (data[i + 4] << 8) | data[i + 5]
+        length = (data[i + 6] << 8) | data[i + 7]
+        start = i + 8
+        end = start + length
+        if end > n:
+            break
+        raw = data[start:end]
+        try:
+            text = raw.decode("utf-8", "replace")
+        except Exception:
+            text = repr(raw)
+        meta[attr_id] = text
+        i = end
+    if meta:
+        for aid, txt in meta.items():
+            name = {
+                1: "Title",
+                2: "Artist",
+                3: "Album",
+                4: "Track#",
+                5: "TotalTracks",
+                6: "Genre",
+                7: "Time(ms)",
+            }.get(aid, f"Attr{aid}")
+            print(f"[META] {name}: {txt}")
+    return meta
 
 
 # ---- EQ commands ----
@@ -405,7 +418,6 @@ def bm83_eq_set(uart, mode: int) -> None:
     mode = max(0, min(10, mode))
     _current_eq_mode = mode
 
-    # Per spec: EQ_Mode_Setting 0x1C, payload [EQ_Mode, Reserved]
     payload = bytes([mode, 0x00])
     bm83_send(uart, OP_EQ_MODE_SETTING, payload, expect_ack=False, label="EQ")
     nx_set_eq_label(mode)
@@ -414,34 +426,84 @@ def bm83_eq_set(uart, mode: int) -> None:
 # ---- Music control (play / next / prev) via Music_Control (0x04) ----
 
 def bm83_play(uart) -> None:
-    # Music_Control 0x04, Reserved=0x00, Action=0x01 (Play/Pause toggle)
-    payload = bytes([0x00, 0x01])
+    payload = bytes([0x00, MC_PLAY_PAUSE])
     bm83_send(uart, OP_MUSIC_CONTROL, payload, expect_ack=False, label="Play/Pause")
 
 
 def bm83_next(uart) -> None:
-    # Music_Control 0x04, Action=0x02 (Next)
-    payload = bytes([0x00, 0x02])
+    global _current_pos_ms, _pos_start_monotonic
+    payload = bytes([0x00, MC_NEXT])
     bm83_send(uart, OP_MUSIC_CONTROL, payload, expect_ack=False, label="Next")
+    # Reset position to 0 for new track
+    _current_pos_ms = 0
+    _pos_start_monotonic = time.monotonic() if _is_playing else None
+    # Refresh metadata
+    bm83_request_metadata(uart)
 
 
 def bm83_prev(uart) -> None:
-    # Music_Control 0x04, Action=0x03 (Previous)
-    payload = bytes([0x00, 0x03])
+    global _current_pos_ms, _pos_start_monotonic
+    payload = bytes([0x00, MC_PREV])
     bm83_send(uart, OP_MUSIC_CONTROL, payload, expect_ack=False, label="Prev")
+    _current_pos_ms = 0
+    _pos_start_monotonic = time.monotonic() if _is_playing else None
+    bm83_request_metadata(uart)
 
 
 def bm83_pair(uart) -> None:
-    payload = bytes([0x5D, 0x00])
+    payload = bytes([0x00, MMI_ENTER_PAIRING])
     bm83_send(uart, OP_MMI_ACTION, payload, expect_ack=False, label="Pair")
 
 
-def bm83_power_toggle(uart) -> None:
+def bm83_power_on(uart) -> bool:
+    """Power ON via MMI press/release sequence (0x51/0x52)."""
     global _power_on
-    sub = MMI_POWER_OFF if _power_on else MMI_POWER_ON
-    payload = bytes([sub, 0x00])
-    bm83_send(uart, OP_MMI_ACTION, payload, expect_ack=False, label="Power")
-    _power_on = not _power_on
+    print("[POWER] ON")
+    ok1 = bm83_send(
+        uart, OP_MMI_ACTION, bytes([0x00, MMI_POWER_ON_PRESS]),
+        label="PwrOn-press"
+    )
+    time.sleep(0.2)
+    ok2 = bm83_send(
+        uart, OP_MMI_ACTION, bytes([0x00, MMI_POWER_ON_RELEASE]),
+        label="PwrOn-release"
+    )
+    if ok1 and ok2:
+        _power_on = True
+    return ok1 and ok2
+
+
+def bm83_power_off(uart) -> bool:
+    """Power OFF via MMI press/release sequence (0x53/0x54)."""
+    global _power_on
+    print("[POWER] OFF")
+    ok1 = bm83_send(
+        uart, OP_MMI_ACTION, bytes([0x00, MMI_POWER_OFF_PRESS]),
+        label="PwrOff-press"
+    )
+    time.sleep(1.5)
+    ok2 = bm83_send(
+        uart, OP_MMI_ACTION, bytes([0x00, MMI_POWER_OFF_RELEASE]),
+        label="PwrOff-release"
+    )
+    if ok1 and ok2:
+        _power_on = False
+    return ok1 and ok2
+
+
+def bm83_power_toggle(uart) -> None:
+    """Robust power toggle."""
+    global _power_on
+    if _power_on is True:
+        if not bm83_power_off(uart):
+            bm83_power_on(uart)
+            return
+    if _power_on is False:
+        if not bm83_power_on(uart):
+            bm83_power_off(uart)
+            return
+    if not bm83_power_on(uart):
+        bm83_power_off(uart)
     print(f"[POWER] Requested {'ON' if _power_on else 'OFF'}")
 
 
@@ -453,8 +515,9 @@ TOK_BT = [
     b"BT_PLAY",
     b"BT_NEXT",
     b"BT_PREV",
-    b"BT_VOLUP",
-    b"BT_VOLDN",
+    b"BT_VOLUP",   # repurposed: cycle EQ preset
+    b"BT_VOLDN",   # repurposed: EQ_OFF
+    b"BT_META",    # request AVRCP metadata manually (optional)
 ]
 
 TOK_EQ = list(EQ_MAP.keys())
@@ -479,6 +542,8 @@ def _ascii_upper_uscore(msg: bytes) -> bool:
 
 
 def handle_token(msg: bytes) -> None:
+    global _is_playing, _current_pos_ms, _pos_start_monotonic, _current_eq_mode
+
     m = msg.strip()
     if not m:
         return
@@ -490,19 +555,40 @@ def handle_token(msg: bytes) -> None:
     elif m == b"BT_PAIR":
         bm83_pair(bm83)
     elif m == b"BT_PLAY":
+        # Toggle play/pause in our local timing model
+        now = time.monotonic()
+        if _is_playing and _pos_start_monotonic is not None:
+            # accumulate elapsed time into base position
+            _current_pos_ms += int((now - _pos_start_monotonic) * 1000)
+            _pos_start_monotonic = None
+            _is_playing = False
+        else:
+            _pos_start_monotonic = now
+            _is_playing = True
         bm83_play(bm83)
     elif m == b"BT_NEXT":
+        _current_pos_ms = 0
+        _pos_start_monotonic = time.monotonic() if _is_playing else None
         bm83_next(bm83)
     elif m == b"BT_PREV":
+        _current_pos_ms = 0
+        _pos_start_monotonic = time.monotonic() if _is_playing else None
         bm83_prev(bm83)
 
-    # ---- volume via GPIO only ----
+    # ---- Vol+ / Vol- repurposed for EQ control ----
     elif m == b"BT_VOLUP":
-        bm83_gpio_volume(True)
+        # Cycle through EQ modes 0..10
+        max_mode = max(EQ_LABELS.keys())
+        next_mode = (_current_eq_mode + 1) % (max_mode + 1)
+        bm83_eq_set(bm83, next_mode)
     elif m == b"BT_VOLDN":
-        bm83_gpio_volume(False)
+        # Hard EQ Off
+        bm83_eq_set(bm83, 0)
 
-    # ---- EQ selection ----
+    elif m == b"BT_META":
+        bm83_request_metadata(bm83)
+
+    # ---- EQ selection via explicit EQ_* tokens (unchanged) ----
     elif m in TOK_EQ:
         mode = EQ_MAP.get(m, 0)
         bm83_eq_set(bm83, mode)
@@ -517,6 +603,7 @@ _nx_buf = bytearray()
 
 
 def process_nextion_bytes(chunk: bytes) -> None:
+    global _nx_buf
     if not chunk:
         return
 
@@ -532,7 +619,7 @@ def process_nextion_bytes(chunk: bytes) -> None:
             break
 
         frame = bytes(_nx_buf[:idx])
-        del _nx_buf[: idx + len(TERM)]
+        _nx_buf = _nx_buf[idx + len(TERM):]
 
         if not frame:
             continue
@@ -554,71 +641,88 @@ def process_nextion_bytes(chunk: bytes) -> None:
                 break
 
 
-def run_mmi_probe_cycle(uart) -> None:
-    print("[MMI] Starting volume probe cycle…")
-    for i, (up_id, dn_id) in enumerate(_CAND_MMI_VOL):
-        print(f"[MMI] Candidate {i}: Vol+ 0x{up_id:02X}, Vol- 0x{dn_id:02X}")
-        uart.write(bm83_frame(OP_MMI_ACTION, bytes([up_id, 0x00])))
-        time.sleep(0.2)
-        uart.write(bm83_frame(OP_MMI_ACTION, bytes([dn_id, 0x00])))
-        time.sleep(0.2)
-    print("[MMI] Probe cycle complete.")
+def _update_live_time(now: float) -> None:
+    """Update tTIME_CUR every ~0.25 s based on our timing model.
+
+    We integrate from time.monotonic(), so loop and polling jitter are
+    inherently included; tightening the update interval just makes the
+    on-screen time feel more "live".
+    """
+    global _last_timecur_update, _current_pos_ms, _pos_start_monotonic
+
+    if now - _last_timecur_update < 0.25:
+        return
+    _last_timecur_update = now
+
+    pos_ms = _current_pos_ms
+    if _is_playing and _pos_start_monotonic is not None:
+        pos_ms += int((now - _pos_start_monotonic) * 1000)
+
+    if _current_track_ms > 0 and pos_ms > _current_track_ms:
+        pos_ms = _current_track_ms
+
+    nx_update_current_time(pos_ms)
 
 
-if HAS_HARDWARE:
-    print("[BM83] Boot settle…")
-    for _ in range(10):
-        time.sleep(0.05)
+# ---- Main ----
 
-    bm83_read_bd_addr(bm83)
-    bm83_unmask_all(bm83)
-    bm83_connectable(bm83, True)
+print("[BM83] Boot settle…")
+for _ in range(10):
+    time.sleep(0.05)
 
-    if AUTO_MMI_PROBE:
-        run_mmi_probe_cycle(bm83)
+bm83_read_bd_addr(bm83)
+bm83_unmask_all(bm83)
+bm83_connectable(bm83, True)
 
-    _last_evt_print = 0.0
+# Default EQ preset: OFF until user changes it
+bm83_eq_set(bm83, 0)
 
-    while True:
-        now = time.monotonic()
+_last_evt_print = 0.0
+_last_meta_poll = time.monotonic()
 
-        evt = bm83_read_event(bm83, timeout=0.01)
-        if evt:
-            etype, op, status, data = evt
+while True:
+    now = time.monotonic()
 
-            # Hook EQ_Mode_Indication: op=0x10, status = EQ_Mode per spec
-            if op == EVT_EQ_MODE_INDICATION:
-                # status byte is EQ_Mode, params[0] is Reserved
-                mode = status
-                if 0x00 <= mode <= 0x0A:
-                    nx_set_eq_label(mode)
+    evt = bm83_read_event(bm83, timeout=0.01)
+    if evt:
+        etype, op, status, data = evt
 
-            interesting = {0x00, 0x10, 0x1A, 0x1B, 0x20, 0x2D}
-            if op in interesting or (now - _last_evt_print) > 1.0:
-                print(
-                    f"[BM83 EVT] type={etype} op=0x{op:02X} status=0x{status:02X} "
-                    f"data={hexdump(data)}"
-                )
-                _last_evt_print = now
+        # AVRCP metadata block: op=0x5D carries element attributes
+        if op == 0x5D:
+            meta = _parse_avrcp_metadata_block(data)
+            if meta:
+                nx_update_metadata(meta)
 
-        if _tx_ind is not None:
-            v = _tx_ind.value
-            if v != _prev_tx_ind:
-                _prev_tx_ind = v
-                print("[TX_IND]", int(v))
+        # AVRCP playback-related notifications (0x1A) – good times to refresh
+        if op == 0x1A:
+            bm83_request_metadata(bm83)
 
-        try:
-            chunk = nextion.read(64)
-        except Exception as e:  # pragma: no cover
-            print("[NX] UART read error:", e)
-            chunk = None
+        interesting = {0x00, 0x10, 0x1A, 0x1B, 0x20, 0x2D}
+        if op in interesting or (now - _last_evt_print) > 1.0:
+            print(
+                f"[BM83 EVT] type={etype} op=0x{op:02X} status=0x{status:02X} "
+                f"data={hexdump(data)}"
+            )
+            _last_evt_print = now
 
-        if chunk:
-            process_nextion_bytes(chunk)
+    # Periodic metadata polling while powered on (faster now)
+    if _power_on and (now - _last_meta_poll) >= META_POLL_INTERVAL:
+        bm83_request_metadata(bm83)
+        _last_meta_poll = now
 
-        time.sleep(0.003)
-else:
-    print("[INFO] Hardware modules not found; main loop disabled.")
+    # Live time (tTIME_CUR) updates
+    _update_live_time(now)
+
+    try:
+        chunk = nextion.read(64)
+    except Exception as e:  # pragma: no cover
+        print("[NX] UART read error:", e)
+        chunk = None
+
+    if chunk:
+        process_nextion_bytes(chunk)
+
+    time.sleep(0.003)
 
 
 # Self-tests (never run in normal operation)
