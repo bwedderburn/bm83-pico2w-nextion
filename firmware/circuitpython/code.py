@@ -1,9 +1,4 @@
-# code.py — BM83 + Pico 2 W + Nextion
-# - BM83 control
-# - AVRCP metadata + live time
-# - EQ presets (VOL+ cycles, VOL- = OFF)
-# - NEW: Pico-driven mute (GP16 → P2.6 mute net)
-# - NEW: BM83 hardware RESET# (GP15) tied into Nextion BT_POWER
+# code.py — BM83 + Pico 2 W + Nextion (BM83 control + AVRCP metadata + EQ via Vol±)
 
 from __future__ import annotations
 
@@ -48,35 +43,7 @@ bm83 = busio.UART(
     receiver_buffer_size=256,
 )
 
-# ---------------------------------------------------------------------------
-# New GPIOs for BM83 mute (P2.6 net) and hardware RESET#
-# ---------------------------------------------------------------------------
 
-# Pico GP16:
-#    BJT/FET that *pulls the shared mute net to GND* when GP16 is HIGH.
-# Shared mute net already includes BM83 P2.6 and both DAC mute pins
-# (one inverted via your 2N3904 for UDA1334A).
-BM83_MUTE_GPIO = board.GP16
-
-# Pico GP15:
-#    BM83 RESET# (active-low). RESET# has pull-up on the BM83 board.
-BM83_RESET_GPIO = board.GP15
-
-mute_pin = digitalio.DigitalInOut(BM83_MUTE_GPIO)
-mute_pin.direction = digitalio.Direction.OUTPUT
-# False  BJT/FET OFF  BM83 P2.6 fully controls mute net (your current behavior)
-mute_pin.value = False
-
-reset_pin = digitalio.DigitalInOut(BM83_RESET_GPIO)
-reset_pin.direction = digitalio.Direction.OUTPUT
-# True  not in reset (RESET# high)
-reset_pin.value = True
-
-# ---------------------------------------------------------------------------
-# Global state
-# ---------------------------------------------------------------------------
-
-_mute_active = False
 _power_on = False
 
 # ---- UART opcodes (from Audio UART Command Set) ----
@@ -109,12 +76,13 @@ MMI_ENTER_PAIRING     = 0x5D
 # AVRCP / metadata
 PDU_GET_ELEMENT_ATTRIBUTES = 0x20  # Get Element Attributes (all info)
 
-# Poll metadata aggressively (now that fluff is gone)
-META_POLL_INTERVAL = 1.0  # seconds
+# Poll metadata more aggressively now that fluff is removed
+META_POLL_INTERVAL = 1.0  # seconds (was ~2.5)
+
+# Optional display offset in milliseconds for tTIME_CUR (set to 0 to disable)
+TIME_OFFSET_MS = 12000
 
 # ---- Track timing / live position state ----
-TIME_OFFSET_MS = 12000      # display was ~12 s behind  we offset what we show
-
 _current_track_ms = 0          # total track length from metadata (ms)
 _current_pos_ms = 0            # accumulated position when paused (ms)
 _pos_start_monotonic = None    # monotonic() timestamp when last started
@@ -154,9 +122,7 @@ EQ_LABELS = {
 _current_eq_mode = 0  # track what we think the EQ mode is
 
 
-# ---------------------------------------------------------------------------
-# Nextion helpers
-# ---------------------------------------------------------------------------
+# ---- Nextion helpers ----
 
 def nx_send_cmd(cmd: str) -> None:
     """Send a raw Nextion command with 0xFF 0xFF 0xFF terminator."""
@@ -170,17 +136,17 @@ def nx_send_cmd(cmd: str) -> None:
 def nx_set_eq_label(mode: int) -> None:
     """Update EQ labels on one or more Nextion pages.
 
-    HMI supports:
-      - tEQ0  (Home)
-      - tEQ1  (Runtime)  [safe if missing]
-      - tEQ2  (legacy/other) [safe if missing]
-
-    We simply broadcast to all three; only existing components react.
+    We keep the same naming as before so EQ feedback wiring remains
+    unchanged. You can have any subset of these in the HMI:
+      - tEQ0  (e.g. main music page)
+      - tEQ1  (legacy; safe if removed)
+      - tEQ2  (another page if desired)
     """
     label = EQ_LABELS.get(mode, f"EQ{mode}")
     print(f"[EQ] Mode {mode} ({label})")
 
-    for name in ("tEQ0", "tEQ1", "tEQ2"):
+    targets = ["tEQ0", "tEQ1", "tEQ2"]
+    for name in targets:
         nx_send_cmd(f'{name}.txt="{label}"')
 
 
@@ -204,8 +170,12 @@ def _format_ms_as_min_sec(ms: int) -> str:
 
 
 def nx_update_current_time(ms: int) -> None:
-    """Update live playback position text field tTIME_CUR (with offset)."""
-    # Apply global display offset
+    """Update live playback position text field tTIME_CUR (applies TIME_OFFSET_MS).
+
+    Applies the global TIME_OFFSET_MS and clamps to the known track length if
+    available so the UI never shows a time beyond the track duration.
+    """
+    # Apply configured display offset
     ms_show = ms + TIME_OFFSET_MS
 
     # Clamp to track length if we know it
@@ -266,21 +236,18 @@ def nx_update_metadata(meta: dict) -> None:
             if isinstance(ms_value, int):
                 _current_track_ms = ms_value
 
-        # Only when the track key changes do we reset the live timer.
+        # Only when the track key changes do we reset the live timer to 0.
         if _last_meta_key != track_key:
             _last_meta_key = track_key
             _current_pos_ms = 0
             _pos_start_monotonic = time.monotonic() if _is_playing else None
-            # On reset, show with offset too
             nx_update_current_time(0)
 
     except Exception as e:
         print("[NX] Metadata update error:", e)
 
 
-# ---------------------------------------------------------------------------
-# BM83 framing / event handling
-# ---------------------------------------------------------------------------
+# ---- BM83 framing / event handling ----
 
 def bm83_frame(opcode: int, payload: bytes = b"") -> bytes:
     """Build a BM83 UART frame.
@@ -382,9 +349,10 @@ def bm83_send(
                 print(f"[ACK {label}] op=0x{opcode:02X} status=0x{status:02X}")
                 return False
         else:
+            # defensive: ensure raw is bytes for hexdump
             print(
                 f"[EVT {label}] type={etype} op=0x{eop:02X} status=0x{status:02X} "
-                f"data={hexdump(raw)}"
+                f"data={hexdump(raw or b'')}"
             )
     return False
 
@@ -405,19 +373,7 @@ def bm83_connectable(uart, enable: bool = True) -> None:
     bm83_send(uart, OP_BTM_UTILITY_FUNC, payload, label="Connectable")
 
 
-def bm83_init_session(uart) -> None:
-    """(Re)apply our standard BM83 host-commands after reset.
-
-    Factored out so we can reuse it when we assert RESET# from the Pico.
-    """
-    bm83_read_bd_addr(uart)
-    bm83_unmask_all(uart)
-    bm83_connectable(uart, True)
-
-
-# ---------------------------------------------------------------------------
-# AVRCP metadata helpers
-# ---------------------------------------------------------------------------
+# ---- AVRCP metadata helpers ----
 
 def bm83_request_metadata(uart) -> None:
     """Request AVRCP 'all information of the media' for current track."""
@@ -474,9 +430,7 @@ def _parse_avrcp_metadata_block(data: bytes) -> dict:
     return meta
 
 
-# ---------------------------------------------------------------------------
-# EQ commands
-# ---------------------------------------------------------------------------
+# ---- EQ commands ----
 
 def bm83_eq_set(uart, mode: int) -> None:
     """Set EQ mode via EQ_Mode_Setting (0x1C) and update indicator."""
@@ -489,9 +443,7 @@ def bm83_eq_set(uart, mode: int) -> None:
     nx_set_eq_label(mode)
 
 
-# ---------------------------------------------------------------------------
-# Music control (play / next / prev) via Music_Control (0x04)
-# ---------------------------------------------------------------------------
+# ---- Music control (play / next / prev) via Music_Control (0x04) ----
 
 def bm83_play(uart) -> None:
     payload = bytes([0x00, MC_PLAY_PAUSE])
@@ -529,12 +481,12 @@ def bm83_power_on(uart) -> bool:
     print("[POWER] ON")
     ok1 = bm83_send(
         uart, OP_MMI_ACTION, bytes([0x00, MMI_POWER_ON_PRESS]),
-        label="PwrOn-press",
+        label="PwrOn-press"
     )
     time.sleep(0.2)
     ok2 = bm83_send(
         uart, OP_MMI_ACTION, bytes([0x00, MMI_POWER_ON_RELEASE]),
-        label="PwrOn-release",
+        label="PwrOn-release"
     )
     if ok1 and ok2:
         _power_on = True
@@ -547,12 +499,12 @@ def bm83_power_off(uart) -> bool:
     print("[POWER] OFF")
     ok1 = bm83_send(
         uart, OP_MMI_ACTION, bytes([0x00, MMI_POWER_OFF_PRESS]),
-        label="PwrOff-press",
+        label="PwrOff-press"
     )
     time.sleep(1.5)
     ok2 = bm83_send(
         uart, OP_MMI_ACTION, bytes([0x00, MMI_POWER_OFF_RELEASE]),
-        label="PwrOff-release",
+        label="PwrOff-release"
     )
     if ok1 and ok2:
         _power_on = False
@@ -575,46 +527,7 @@ def bm83_power_toggle(uart) -> None:
     print(f"[POWER] Requested {'ON' if _power_on else 'OFF'}")
 
 
-# ---------------------------------------------------------------------------
-# New: BM83 hardware RESET# and mute helpers
-# ---------------------------------------------------------------------------
-
-def bm83_hardware_reset() -> None:
-    """Assert BM83 RESET# via Pico GPIO, then re-init UART session.
-
-    Wiring:
-      * GP15  BM83 RESET# (active-low, pulled up on BM83 board).
-    """
-    print("[BM83] Hardware RESET# pulse")
-    reset_pin.value = False     # hold in reset
-    time.sleep(0.02)            # >= 10 ms is usually enough
-    reset_pin.value = True      # release reset
-    time.sleep(0.3)             # let BM83 firmware boot
-    # Re-apply our standard host configuration
-    bm83_init_session(bm83)
-
-
-def set_mute(active: bool) -> None:
-    """Drive the shared mute net via GP16  BJT/FET into BM83 P2.6 net.
-
-    Assumed hardware:
-      * Shared mute net: BM83 P2.6 + DAC mute pins
-      * GP16 HIGH  BJT/FET ON  net pulled LOW  mute asserted
-      * GP16 LOW   BJT/FET OFF  BM83 P2.6 owns the mute net
-    """
-    global _mute_active
-    _mute_active = bool(active)
-    if _mute_active:
-        print("[MUTE] Active (Pico pulling mute net low)")
-        mute_pin.value = True   # drive BJT/FET ON
-    else:
-        print("[MUTE] Released (BM83 P2.6 free to drive)")
-        mute_pin.value = False  # BJT/FET OFF
-
-
-# ---------------------------------------------------------------------------
-# Nextion token handling
-# ---------------------------------------------------------------------------
+# ---- Nextion token handling ----
 
 TOK_BT = [
     b"BT_POWER",
@@ -622,12 +535,9 @@ TOK_BT = [
     b"BT_PLAY",
     b"BT_NEXT",
     b"BT_PREV",
-    b"BT_VOLUP",    # repurposed: cycle EQ preset
-    b"BT_VOLDN",    # repurposed: EQ_OFF
-    b"BT_META",     # request AVRCP metadata manually (optional)
-    b"BT_MUTE",     # NEW: toggle mute
-    b"BT_MUTE_ON",  # NEW: force mute
-    b"BT_MUTE_OFF", # NEW: force unmute
+    b"BT_VOLUP",   # repurposed: cycle EQ preset
+    b"BT_VOLDN",   # repurposed: EQ_OFF
+    b"BT_META",    # request AVRCP metadata manually (optional)
 ]
 
 TOK_EQ = list(EQ_MAP.keys())
@@ -661,17 +571,9 @@ def handle_token(msg: bytes) -> None:
     print("Action:", m.decode("ascii"))
 
     if m == b"BT_POWER":
-        # On first power press after boot we typically have _power_on == False.
-        # To mirror your current workflow (press RESET then POWER), we:
-        #   1) If _power_on is False, pulse RESET# and re-init host session.
-        #   2) Then use the existing MMI power-toggle.
-        if not _power_on:
-            bm83_hardware_reset()
         bm83_power_toggle(bm83)
-
     elif m == b"BT_PAIR":
         bm83_pair(bm83)
-
     elif m == b"BT_PLAY":
         # Toggle play/pause in our local timing model
         now = time.monotonic()
@@ -684,12 +586,10 @@ def handle_token(msg: bytes) -> None:
             _pos_start_monotonic = now
             _is_playing = True
         bm83_play(bm83)
-
     elif m == b"BT_NEXT":
         _current_pos_ms = 0
         _pos_start_monotonic = time.monotonic() if _is_playing else None
         bm83_next(bm83)
-
     elif m == b"BT_PREV":
         _current_pos_ms = 0
         _pos_start_monotonic = time.monotonic() if _is_playing else None
@@ -701,7 +601,6 @@ def handle_token(msg: bytes) -> None:
         max_mode = max(EQ_LABELS.keys())
         next_mode = (_current_eq_mode + 1) % (max_mode + 1)
         bm83_eq_set(bm83, next_mode)
-
     elif m == b"BT_VOLDN":
         # Hard EQ Off
         bm83_eq_set(bm83, 0)
@@ -709,21 +608,10 @@ def handle_token(msg: bytes) -> None:
     elif m == b"BT_META":
         bm83_request_metadata(bm83)
 
-    # ---- New: mute controls from HMI ----
-    elif m == b"BT_MUTE":
-        set_mute(not _mute_active)
-
-    elif m == b"BT_MUTE_ON":
-        set_mute(True)
-
-    elif m == b"BT_MUTE_OFF":
-        set_mute(False)
-
     # ---- EQ selection via explicit EQ_* tokens (unchanged) ----
     elif m in TOK_EQ:
         mode = EQ_MAP.get(m, 0)
         bm83_eq_set(bm83, mode)
-
     else:
         print("[WARN] Unhandled token:", m)
 
@@ -796,15 +684,12 @@ def _update_live_time(now: float) -> None:
     nx_update_current_time(pos_ms)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# ---- Main ----
 
 print("[BM83] Boot settle…")
 for _ in range(10):
     time.sleep(0.05)
 
-# Original session init path kept as-is; RESET# path reuses bm83_init_session().
 bm83_read_bd_addr(bm83)
 bm83_unmask_all(bm83)
 bm83_connectable(bm83, True)
@@ -828,7 +713,7 @@ while True:
             if meta:
                 nx_update_metadata(meta)
 
-        # AVRCP playback-related notifications (0x1A)  good times to refresh
+        # AVRCP playback-related notifications (0x1A) – good times to refresh
         if op == 0x1A:
             bm83_request_metadata(bm83)
 
@@ -840,7 +725,7 @@ while True:
             )
             _last_evt_print = now
 
-    # Periodic metadata polling while powered on
+    # Periodic metadata polling while powered on (faster now)
     if _power_on and (now - _last_meta_poll) >= META_POLL_INTERVAL:
         bm83_request_metadata(bm83)
         _last_meta_poll = now

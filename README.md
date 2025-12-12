@@ -14,5 +14,14 @@
 2. Copy `firmware/circuitpython/code.py` to the `CIRCUITPY` drive (rename to `code.py` if needed).
 3. Open a serial terminal to the Pico and watch logs.
 
-## Hardware
-- `hardware/kicad/` reserved for KiCad 9.0 project (BM83+Pico+Nextion carrier).
+## Display offset and live time
+- The firmware applies a TIME_OFFSET_MS (default 12000 ms) to the on-screen live position (tTIME_CUR) to compensate for display lag.
+- You can change TIME_OFFSET_MS in `code.py` near the top of the file.
+
+## Linting / CI
+- CI uses flake8. To run locally:
+  - flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+  - flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+## License
+This project is provided under the MIT License. See LICENSE for details.
