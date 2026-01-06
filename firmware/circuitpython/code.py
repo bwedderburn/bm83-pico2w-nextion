@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import time
 
-import board
-import busio
-import digitalio
+# Detect if CircuitPython hardware is available
+try:
+    import board
+    import busio
+    import digitalio
+    HAS_HARDWARE = True
+except ImportError:
+    HAS_HARDWARE = False
+    # Mock hardware for testing
+    board = None  # type: ignore
+    busio = None  # type: ignore
+    digitalio = None  # type: ignore
 
 
 def hexdump(data: bytes, width: int = 16) -> str:
@@ -19,29 +28,41 @@ def hexdump(data: bytes, width: int = 16) -> str:
     return " | ".join(parts)
 
 
-BM83_BAUD = 115200
-NX_BAUD = 9600
+if not HAS_HARDWARE:
+    # Stub UART objects for testing
+    class _MockUART:
+        def read(self, n):
+            return None
 
-BM83_TX = board.GP12
-BM83_RX = board.GP13
-NX_TX = board.GP8
-NX_RX = board.GP9
+        def write(self, data):
+            pass
 
-nextion = busio.UART(
-    NX_TX,
-    NX_RX,
-    baudrate=NX_BAUD,
-    timeout=0.01,
-    receiver_buffer_size=128,
-)
+    nextion = _MockUART()  # type: ignore
+    bm83 = _MockUART()  # type: ignore
+else:
+    BM83_BAUD = 115200
+    NX_BAUD = 9600
 
-bm83 = busio.UART(
-    BM83_TX,
-    BM83_RX,
-    baudrate=BM83_BAUD,
-    timeout=0.02,
-    receiver_buffer_size=256,
-)
+    BM83_TX = board.GP12
+    BM83_RX = board.GP13
+    NX_TX = board.GP8
+    NX_RX = board.GP9
+
+    nextion = busio.UART(
+        NX_TX,
+        NX_RX,
+        baudrate=NX_BAUD,
+        timeout=0.01,
+        receiver_buffer_size=128,
+    )
+
+    bm83 = busio.UART(
+        BM83_TX,
+        BM83_RX,
+        baudrate=BM83_BAUD,
+        timeout=0.02,
+        receiver_buffer_size=256,
+    )
 
 
 _power_on = False
@@ -685,63 +706,64 @@ def _update_live_time(now: float) -> None:
 
 # ---- Main ----
 
-print("[BM83] Boot settle…")
-for _ in range(10):
-    time.sleep(0.05)
+if HAS_HARDWARE:
+    print("[BM83] Boot settle…")
+    for _ in range(10):
+        time.sleep(0.05)
 
-bm83_read_bd_addr(bm83)
-bm83_unmask_all(bm83)
-bm83_connectable(bm83, True)
+    bm83_read_bd_addr(bm83)
+    bm83_unmask_all(bm83)
+    bm83_connectable(bm83, True)
 
-# Default EQ preset: OFF until user changes it
-bm83_eq_set(bm83, 0)
+    # Default EQ preset: OFF until user changes it
+    bm83_eq_set(bm83, 0)
 
-_last_evt_print = 0.0
-_last_meta_poll = time.monotonic()
+    _last_evt_print = 0.0
+    _last_meta_poll = time.monotonic()
 
-while True:
-    now = time.monotonic()
+    while True:
+        now = time.monotonic()
 
-    evt = bm83_read_event(bm83, timeout=0.01)
-    if evt:
-        etype, op, status, data = evt
+        evt = bm83_read_event(bm83, timeout=0.01)
+        if evt:
+            etype, op, status, data = evt
 
-        # AVRCP metadata block: op=0x5D carries element attributes
-        if op == 0x5D:
-            meta = _parse_avrcp_metadata_block(data)
-            if meta:
-                nx_update_metadata(meta)
+            # AVRCP metadata block: op=0x5D carries element attributes
+            if op == 0x5D:
+                meta = _parse_avrcp_metadata_block(data)
+                if meta:
+                    nx_update_metadata(meta)
 
-        # AVRCP playback-related notifications (0x1A) – good times to refresh
-        if op == 0x1A:
+            # AVRCP playback-related notifications (0x1A) – good times to refresh
+            if op == 0x1A:
+                bm83_request_metadata(bm83)
+
+            interesting = {0x00, 0x10, 0x1A, 0x1B, 0x20, 0x2D}
+            if op in interesting or (now - _last_evt_print) > 1.0:
+                print(
+                    f"[BM83 EVT] type={etype} op=0x{op:02X} status=0x{status:02X} "
+                    f"data={hexdump(data)}"
+                )
+                _last_evt_print = now
+
+        # Periodic metadata polling while powered on (faster now)
+        if _power_on and (now - _last_meta_poll) >= META_POLL_INTERVAL:
             bm83_request_metadata(bm83)
+            _last_meta_poll = now
 
-        interesting = {0x00, 0x10, 0x1A, 0x1B, 0x20, 0x2D}
-        if op in interesting or (now - _last_evt_print) > 1.0:
-            print(
-                f"[BM83 EVT] type={etype} op=0x{op:02X} status=0x{status:02X} "
-                f"data={hexdump(data)}"
-            )
-            _last_evt_print = now
+        # Live time (tTIME_CUR) updates
+        _update_live_time(now)
 
-    # Periodic metadata polling while powered on (faster now)
-    if _power_on and (now - _last_meta_poll) >= META_POLL_INTERVAL:
-        bm83_request_metadata(bm83)
-        _last_meta_poll = now
+        try:
+            chunk = nextion.read(64)
+        except Exception as e:  # pragma: no cover
+            print("[NX] UART read error:", e)
+            chunk = None
 
-    # Live time (tTIME_CUR) updates
-    _update_live_time(now)
+        if chunk:
+            process_nextion_bytes(chunk)
 
-    try:
-        chunk = nextion.read(64)
-    except Exception as e:  # pragma: no cover
-        print("[NX] UART read error:", e)
-        chunk = None
-
-    if chunk:
-        process_nextion_bytes(chunk)
-
-    time.sleep(0.003)
+        time.sleep(0.003)
 
 
 # Self-tests (never run in normal operation)
