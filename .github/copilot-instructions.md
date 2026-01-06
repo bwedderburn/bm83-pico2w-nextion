@@ -15,6 +15,38 @@ This repository contains firmware and hardware files for a Raspberry Pi Pico 2 W
 ## Code Structure
 - `firmware/circuitpython/code.py`: Main firmware implementation
 - `.github/workflows/python-package.yml`: CI/CD pipeline with flake8 linting and pytest
+- `tests/`: Unit tests for firmware code
+- `Documents/`: Hardware datasheets and reference materials
+
+## Core Commands
+
+### Linting
+```bash
+# Check for syntax errors and undefined names (strict - will fail build)
+flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+
+# Check for style issues and complexity (warnings only)
+flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+```
+
+### Testing
+```bash
+# Run all tests
+pytest
+
+# Run tests with verbose output
+pytest -v
+
+# Run specific test file
+pytest tests/test_code.py
+```
+
+### Installation
+```bash
+# Install development dependencies
+python -m pip install --upgrade pip
+python -m pip install flake8 pytest
+```
 
 ## Coding Standards
 - **Linting**: Strict flake8 compliance required
@@ -62,9 +94,65 @@ This repository contains firmware and hardware files for a Raspberry Pi Pico 2 W
 4. **Sanitize Nextion text** (remove CR/LF/quotes, limit length)
 5. **Track play/pause state carefully** for accurate time display
 
+## Boundaries - DO NOT MODIFY
+
+The following files and directories should **never** be modified by automated changes:
+- `Documents/` - Hardware datasheets and vendor-provided reference materials
+- `.github/workflows/` - CI/CD pipeline configuration (except with explicit permission)
+- `LICENSE` - Project license file
+- `SECURITY.md` - Security policy
+- Hardware design files (if present in future) - KiCad schematics, PCB layouts
+
+## Acceptance Criteria
+
+All changes must meet the following criteria before merging:
+1. **Code Quality**:
+   - Pass all flake8 checks (both strict and style)
+   - No new warnings or errors introduced
+   - Maintain or improve code complexity scores
+
+2. **Testing**:
+   - All existing tests must pass
+   - New features should include unit tests
+   - Test coverage should not decrease
+
+3. **Documentation**:
+   - Update README.md if functionality changes
+   - Add/update docstrings for new/modified functions
+   - Document any new hardware interactions or protocols
+
+4. **Hardware Compatibility**:
+   - Changes must not break existing UART communication
+   - Maintain compatibility with BM83 protocol specification
+   - Preserve timing-critical operations
+
 ## When Suggesting Changes
 - Ensure flake8 compliance (especially F824 for unused globals)
 - Maintain non-blocking event loop structure
 - Preserve existing timing and state management logic
 - Test UART communication changes thoroughly
 - Document hardware-specific behaviors
+
+## Example Code Pattern
+
+### Good: Reading a global variable (no `global` declaration needed)
+```python
+def check_power_status() -> bool:
+    """Check if BM83 is powered on."""
+    return _power_on  # Reading only - no global declaration
+```
+
+### Good: Modifying a global variable (requires `global` declaration)
+```python
+def set_power_state(on: bool) -> None:
+    """Set BM83 power state."""
+    global _power_on  # Assigning - needs global declaration
+    _power_on = on
+```
+
+### BM83 Command Example
+```python
+def send_play_pause() -> None:
+    """Send play/pause command to BM83."""
+    bm83_send(OP_MUSIC_CONTROL, bytes([MC_PLAY_PAUSE]))
+```
