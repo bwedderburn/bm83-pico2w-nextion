@@ -202,7 +202,7 @@ def nx_update_metadata(meta: dict) -> None:
     jumping back to 0 on every periodic metadata poll.
     """
     global _current_track_ms, _current_pos_ms, _pos_start_monotonic
-    global _is_playing, _last_meta_key
+    global _last_meta_key
 
     try:
         title = _nx_safe_text(meta.get(1, ""))
@@ -513,7 +513,6 @@ def bm83_power_off(uart) -> bool:
 
 def bm83_power_toggle(uart) -> None:
     """Robust power toggle."""
-    global _power_on
     if _power_on is True:
         if not bm83_power_off(uart):
             bm83_power_on(uart)
@@ -562,7 +561,7 @@ def _ascii_upper_uscore(msg: bytes) -> bool:
 
 
 def handle_token(msg: bytes) -> None:
-    global _is_playing, _current_pos_ms, _pos_start_monotonic, _current_eq_mode
+    global _is_playing, _current_pos_ms, _pos_start_monotonic
 
     m = msg.strip()
     if not m:
@@ -668,7 +667,7 @@ def _update_live_time(now: float) -> None:
     inherently included; tightening the update interval just makes the
     on-screen time feel more "live".
     """
-    global _last_timecur_update, _current_pos_ms, _pos_start_monotonic
+    global _last_timecur_update
 
     if now - _last_timecur_update < 0.25:
         return
