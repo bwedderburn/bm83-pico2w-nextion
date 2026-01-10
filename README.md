@@ -8,12 +8,16 @@ This project integrates a Microchip BM83 Bluetooth module with an ESP32-S3 and a
 
 The main entrypoint is `firmware/circuitpython/code.py`.
 
+CircuitPython support modules also live under `firmware/circuitpython/`.
+
 ### Module layout
 
-- `bm83.py`: Driver and protocol handling for the Microchip BM83 Bluetooth audio module.
-- `nextion.py`: High-level interface for communicating with and updating the Nextion HMI display.
-- `ble_hid.py`: Bluetooth LE HID helpers (reports, pairing/connection glue) used for HID functionality.
-- `utils.py`: Shared utility functions (parsing, framing, small helpers) used across modules.
+All modules below are located in `firmware/circuitpython/`:
+
+- `bm83.py`: BM83 UART framing + event parsing + AVRCP helpers (play status, notifications, element attributes) and EQ state syncing.
+- `nextion.py`: Nextion UART protocol (token parsing, command queue, `sendme` polling) and helper methods to update page objects.
+- `ble_hid.py`: Optional BLE HID **ConsumerControl** helper used for volume up/down and mute.
+- `utils.py`: Shared helpers such as `sanitize_text()` and `fmt_ms()` used by the runtime and protocol layers.
 
 ## Firmware
 
