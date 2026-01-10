@@ -1,433 +1,762 @@
-#!/usr/bin/env python3
-"""
-BM83 module controller
+# /code.py
+# ===========================================================
+# ESP32-S3 DevKitC-1 + BM83 + Nextion NX3224F028 + BLE HID Volume
+# CircuitPython 10.x
+#
+# Fix in this revision:
+# - Metadata refresh is triggered by play-status changes (pos reset / total change),
+#   so title/artist/album update even if TrackChanged notifications are missing.
+# ===========================================================
 
-This module provides an interface for communicating with BM83 Bluetooth audio modules.
-It handles UART communication, command framing, and event parsing.
-
-Configuration:
-- UART baudrate: 115200
-- Data bits: 8
-- Parity: None
-- Stop bits: 1
-
-Author: Your Name
-Date: 2024
-"""
-
+import gc
 import time
 import board
 import busio
-import digitalio
-from collections import namedtuple
 
-# BM83 UART Configuration
-UART_BAUDRATE = 115200
-UART_TIMEOUT = 1.0
+DEBUG = True
 
-# BM83 Command/Event Constants
-CMD_HEADER = 0xAA
-EVT_HEADER = 0xAA
 
-# Command Opcodes
-CMD_MAKE_CALL = 0x00
-CMD_MAKE_EXTENSION_CALL = 0x01
-CMD_MMI_ACTION = 0x02
-CMD_EVENT_ACK = 0x04
-CMD_MUSIC_CONTROL = 0x05
-CMD_CHANGE_DEVICE_NAME = 0x06
-CMD_CHANGE_PIN_CODE = 0x07
-CMD_BTM_PARAMETER_SETTING = 0x08
-CMD_READ_BTM_VERSION = 0x09
-CMD_GET_PB_BY_AT_CMD = 0x0A
-CMD_VENDOR_AT_COMMAND = 0x0B
-CMD_AVRCP_SPEC_CMD = 0x0C
-CMD_AVRCP_GROUP_NAVIGATION = 0x0D
-CMD_READ_LINK_STATUS = 0x0E
-CMD_READ_PAIRED_DEVICE_RECORD = 0x0F
-CMD_READ_LOCAL_BD_ADDRESS = 0x10
-CMD_READ_LOCAL_DEVICE_NAME = 0x11
-CMD_SET_ACCESS_PB_METHOD = 0x12
-CMD_SEND_SPP_DATA = 0x13
-CMD_BTM_UTILITY_FUNCTION = 0x14
-CMD_EVENT_MASK_SETTING = 0x15
-CMD_SEND_BTM_POWER_OFF = 0x16
-CMD_STANDBY_MODE_CONTROL = 0x17
-CMD_MCU_STATUS_INDICATION = 0x18
-CMD_VOICE_PROMPT_CMD = 0x19
-CMD_SET_OVERALL_GAIN = 0x1A
-CMD_READ_BTM_LINK_MODE = 0x1B
-CMD_CONFIGURE_VENDOR_PARAM = 0x1C
-CMD_READ_VENDOR_EEPROM = 0x1D
-CMD_CODEC_CAPABILITY = 0x1E
-CMD_PBAPC_READ_PB = 0x1F
-CMD_READ_BTM_BATTERY_CHARGE_STATUS = 0x29
-CMD_MCU_UPDATE_BATTERY_LEVEL = 0x2A
-CMD_READ_BTM_SETTING = 0x2B
-CMD_REPORT_BTM_INITIAL_STATUS = 0x2E
-CMD_SET_BTM_TX_POWER = 0x30
-CMD_READ_BTM_TX_POWER = 0x31
-CMD_LE_ANCS_SERVICE = 0x40
-CMD_LE_SIGNALING = 0x41
-CMD_GATT_GENERIC = 0x42
-CMD_DFU = 0x47
-CMD_RESET_EEPROM_SETTING = 0x1E8
-CMD_SET_AUDIO_BUFFER = 0x1EA
-CMD_SET_UART_BAUD_RATE = 0x1EC
-CMD_READ_TWS_LOCAL_DEVICE_INFO = 0x2C
+def dprint(*a):
+    if DEBUG:
+        print(*a)
 
-# Event Opcodes
-EVT_COMMAND_ACK = 0x00
-EVT_BTM_STATUS = 0x01
-EVT_CALL_STATUS = 0x02
-EVT_CALLER_ID = 0x03
-EVT_SMS_RECEIVED_IND = 0x04
-EVT_MISSED_CALL_IND = 0x05
-EVT_PHONE_MAX_BATTERY_LEVEL = 0x06
-EVT_PHONE_BATTERY_LEVEL = 0x07
-EVT_PHONE_ROAMING_STATUS = 0x08
-EVT_PHONE_MAX_SIGNAL_STRENGTH = 0x09
-EVT_PHONE_SIGNAL_STRENGTH = 0x0A
-EVT_PHONE_SERVICE_STATUS = 0x0B
-EVT_BTM_BATTERY_LEVEL = 0x0C
-EVT_BTM_CHARGING_STATUS = 0x0D
-EVT_RESET_TO_DEFAULT = 0x0E
-EVT_REPORT_HF_GAIN_LEVEL = 0x0F
-EVT_EQ_MODE_INDICATION = 0x10
-EVT_PBAP_MISSED_CALL_HISTORY = 0x11
-EVT_PBAP_RECEIVED_CALL_HISTORY = 0x12
-EVT_PBAP_DIALED_CALL_HISTORY = 0x13
-EVT_PBAP_COMBINE_CALL_HISTORY = 0x14
-EVT_PHONE_BOOK_INFO = 0x15
-EVT_PHONE_BOOK_CONTACT = 0x16
-EVT_READ_LINKED_DEVICE_INFO = 0x17
-EVT_READ_BTM_VERSION = 0x18
-EVT_CALL_LIST_REPORT = 0x19
-EVT_AVRCP_SPEC_RSP = 0x1A
-EVT_BTM_UTILITY_REQ = 0x1B
-EVT_VENDOR_AT_CMD_RSP = 0x1C
-EVT_READ_LINK_STATUS = 0x1D
-EVT_READ_PAIRED_DEVICE_RECORD = 0x1E
-EVT_READ_LOCAL_BD_ADDRESS = 0x1F
-EVT_READ_LOCAL_DEVICE_NAME = 0x20
-EVT_REPORT_SPP_DATA = 0x21
-EVT_REPORT_LINK_BACK_STATUS = 0x22
-EVT_RINGTONE_FINISH_INDICATE = 0x23
-EVT_USER_CONFIRM_SSP_REQ = 0x24
-EVT_REPORT_AVRCP_VOL_CTRL = 0x26
-EVT_REPORT_INPUT_SIGNAL_LEVEL = 0x27
-EVT_REPORT_iAP_INFO = 0x28
-EVT_REPORT_AVRCP_ABS_VOL_CTRL = 0x29
-EVT_REPORT_VOICE_PROMPT_STATUS = 0x2A
-EVT_REPORT_MAP_DATA = 0x2B
-EVT_SECURITY_BONDING_RES = 0x2C
-EVT_REPORT_TYPE_CODEC = 0x2D
-EVT_REPORT_TYPE_BTM_SETTING = 0x2E
-EVT_REPORT_MCU_UPDATE_REPLY = 0x2F
-EVT_REPORT_BTM_INITIAL_STATUS = 0x30
-EVT_REPORT_LE_EVENT = 0x31
-EVT_REPORT_nSPK_VENDOR_EVENT = 0x32
-EVT_REPORT_nSPK_LINK_STATUS = 0x33
-EVT_REPORT_nSPK_AUDIO_SETTING = 0x34
-EVT_REPORT_AVRCP_MEDIA_STATUS = 0x35
-EVT_REPORT_nSPK_CHANNEL_SETTING = 0x36
-EVT_LE_ANCS_SERVICE_EVENT = 0x40
-EVT_LE_GATT_EVENT = 0x41
-EVT_REPORT_CUSTOMER_GATT_ATTRIBUTE_DATA = 0x42
-EVT_REPORT_BUTTON_ACTION_RESPONSE = 0x43
-EVT_REPORT_TWS_RX_VENDOR_CMD = 0x44
-EVT_REPORT_TWS_LOCAL_DEVICE_STATUS = 0x45
-EVT_REPORT_TWS_VAD_DATA = 0x46
-EVT_DFU_EVENT = 0x47
-EVT_REPORT_TWS_EAR_BUD_POSITION = 0x48
 
-# MMI Actions
-MMI_ADD_REMOVE_SCO_LINK = 0x01
-MMI_FORCE_END_CALL = 0x02
-MMI_ACCEPT_CALL = 0x04
-MMI_REJECT_CALL = 0x05
-MMI_1_CALL_TRANSFER = 0x06
-MMI_2_CALL_HOLD_ACCEPT_HELD = 0x07
-MMI_3_CALL_HOLD_ACCEPT_HELD = 0x08
-MMI_VOICE_DIAL = 0x09
-MMI_LAST_NUMBER_REDIAL = 0x0A
-MMI_ACTIVE_CALL_HOLD_ACCEPT_HELD = 0x0B
-MMI_VOICE_TRANSFER = 0x0C
-MMI_QUERY_CALL_LIST_INFO = 0x0D
-MMI_THREE_WAY_CALL = 0x0E
-MMI_RELEASE_CALL = 0x0F
-MMI_ACCEPT_WAITING_HOLD_CALL_RLS_ACTIVE_CALL = 0x10
-MMI_TOGGLE_MIC_MUTE = 0x40
-MMI_DISABLE_MIC = 0x41
-MMI_ENABLE_MIC = 0x42
-MMI_DISCONNECT_HF = 0x50
-MMI_INCREASE_MIC_GAIN = 0x60
-MMI_DECREASE_MIC_GAIN = 0x61
-MMI_SWITCH_PRIMARY_SECONDARY_HF = 0x62
-MMI_INCREASE_SPEAKER_GAIN = 0x63
-MMI_DECREASE_SPEAKER_GAIN = 0x64
-MMI_NEXT_AUDIO_EFFECT_MODE = 0x70
-MMI_PREVIOUS_AUDIO_EFFECT_MODE = 0x71
-MMI_IND_BATTERY_STATUS = 0x80
-MMI_IND_USER_ACTIVE = 0x81
-MMI_TOGGLE_BTM_POWER = 0x90
-MMI_POWER_ON_BTM = 0x91
-MMI_POWER_OFF_BTM = 0x92
-MMI_ACCEPT_DFU = 0xA0
-MMI_REJECT_DFU = 0xA1
-MMI_DISCOVERABLE = 0xB0
-MMI_TOGGLE_DISCOVERABLE = 0xB1
-MMI_NON_DISCOVERABLE = 0xB2
-MMI_ENTER_PAIRING_MODE = 0xC0
-MMI_POWER_ON_BUTTON_PRESS = 0xC1
-MMI_POWER_ON_BUTTON_RELEASE = 0xC2
-MMI_SWITCH_AUDIO_OUTPUT = 0xD0
-MMI_DISCONNECT_A2DP = 0xD1
-MMI_NEXT_SONG = 0xE0
-MMI_PREVIOUS_SONG = 0xE1
-MMI_PLAY_PAUSE = 0xE2
-MMI_FAST_FORWARD_PRESS = 0xE3
-MMI_FAST_FORWARD_RELEASE = 0xE4
-MMI_FAST_BACKWARD_PRESS = 0xE5
-MMI_FAST_BACKWARD_RELEASE = 0xE6
-MMI_PLAY = 0xE7
-MMI_PAUSE = 0xE8
-MMI_REWIND = 0xE9
-MMI_FAST_FORWARD_2 = 0xEA
-MMI_STOP = 0xEB
-MMI_RETRIEVE_PHONEBOOK = 0xF0
-MMI_RETRIEVE_MCH = 0xF1
-MMI_RETRIEVE_ICH = 0xF2
-MMI_RETRIEVE_OCH = 0xF3
-MMI_RETRIEVE_CCH = 0xF4
-MMI_CANCEL_ACCESS_PHONEBOOK = 0xF5
+NX_BAUD = 9600
+BM83_BAUD = 115200
 
-# BTM Status
-BTM_POWER_OFF = 0x00
-BTM_POWER_ON = 0x01
-BTM_PAIRING_STATE = 0x02
-BTM_STANDBY_STATE = 0x03
-BTM_DISCOVERABLE = 0x05
-BTM_HFP_CONNECTED = 0x06
-BTM_A2DP_CONNECTED = 0x07
-BTM_HFP_DISCONNECTED = 0x08
-BTM_A2DP_DISCONNECTED = 0x09
-BTM_SCO_CONNECTED = 0x0A
-BTM_SCO_DISCONNECTED = 0x0B
-BTM_AVRCP_CONNECTED = 0x0C
-BTM_AVRCP_DISCONNECTED = 0x0D
-BTM_SPP_CONNECTED = 0x0E
-BTM_SPP_DISCONNECTED = 0x0F
+NX_TX, NX_RX = board.IO15, board.IO16
+BM83_TX, BM83_RX = board.IO17, board.IO18
 
-# Named tuple for command/event structure
-Frame = namedtuple('Frame', ['start', 'length', 'opcode', 'params', 'checksum'])
+BLE_ENABLED = True
+BLE_NAME = "AmpBench Remote"
 
-class BM83:
-    """BM83 Bluetooth module controller"""
-    
-    def __init__(self, uart_tx, uart_rx, reset_pin=None):
-        """
-        Initialize BM83 controller
-        
-        Args:
-            uart_tx: TX pin for UART
-            uart_rx: RX pin for UART
-            reset_pin: Optional reset pin
-        """
-        self.uart = busio.UART(uart_tx, uart_rx, baudrate=UART_BAUDRATE, timeout=UART_TIMEOUT)
-        
-        if reset_pin:
-            self.reset = digitalio.DigitalInOut(reset_pin)
-            self.reset.direction = digitalio.Direction.OUTPUT
-            self.reset.value = True
-        else:
-            self.reset = None
-    
-    def hardware_reset(self):
-        """Perform hardware reset of BM83 module"""
-        if self.reset:
-            self.reset.value = False
-            time.sleep(0.1)
-            self.reset.value = True
-            time.sleep(0.5)
-    
-    def send_command(self, opcode, params=None):
-        """
-        Send command to BM83 module
-        
-        Args:
-            opcode: Command opcode
-            params: Optional parameter bytes
-        """
-        if params is None:
-            params = []
-        
-        frame = bm83_frame(opcode, params)
-        self.uart.write(frame)
-    
-    def read_event(self):
-        """
-        Read event from BM83 module
-        
-        Returns:
-            Frame object or None if no complete frame available
-        """
-        # Check if data is available
-        if self.uart.in_waiting < 4:  # Minimum frame size
+TERM = b"\xFF\xFF\xFF"
+TOKENS = {
+    b"BT_POWER",
+    b"BT_POWEROFF",
+    b"BT_PAIR",
+    b"BT_PLAY",
+    b"BT_PREV",
+    b"BT_NEXT",
+    b"BT_VOLUP",
+    b"BT_VOLDN",
+}
+
+EQ_OBJ_PAGE0 = "tEQ0"
+EQ_OBJ_PAGE1 = "tEQ1"
+NX_RUNTIME = {
+    "title": "tTitle",
+    "artist": "tArtist",
+    "album": "tAlbum",
+    "genre": "tGenre",
+    "time_cur": "tTIME_CUR",
+    "time": "tTime",
+    "track_num": "tTrack_num",
+    "total_tracks": "tTotalTracks",
+}
+
+
+def _sanitize_text(txt, max_len=48):
+    if txt is None:
+        return "—"
+    out = []
+    for ch in str(txt):
+        o = ord(ch)
+        out.append(ch if 32 <= o <= 126 else " ")
+    s = "".join(out).replace('"', "'").strip()
+    if not s:
+        s = "—"
+    if len(s) > max_len:
+        s = s[: max_len - 1] + "…"
+    return s
+
+
+def _fmt_ms(ms):
+    if ms is None:
+        return "—"
+    try:
+        ms = int(ms)
+    except Exception:
+        return _sanitize_text(ms, max_len=16)
+    if ms < 0:
+        ms = 0
+    total = ms // 1000
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    if h > 0:
+        return "%d:%02d:%02d" % (h, m, s)
+    return "%d:%02d" % (m, s)
+
+
+# ---------------- Nextion ----------------
+class Nextion:
+    def __init__(self, uart):
+        self.uart = uart
+        self._rx = bytearray()
+
+        self.current_page = None
+        self._last_sendme_at = 0.0
+        self._sendme_period_s = 0.5
+
+        self._txq = []
+        self._last_tx_at = 0.0
+        self._tx_interval_s = 0.035
+
+        self._last_token = None
+        self._last_token_at = 0.0
+
+    def boot_sync(self, delay_s=0.8):
+        time.sleep(delay_s)
+        self._rx = bytearray()
+        self._txq.clear()
+        self.current_page = None
+        self._last_sendme_at = 0.0
+        self._last_tx_at = 0.0
+        self.enqueue("bkcmd=3")
+        self.enqueue("sendme")
+
+    def enqueue(self, cmd):
+        self._txq.append(cmd)
+
+    def sendme_tick(self):
+        now = time.monotonic()
+        if (now - self._last_sendme_at) >= self._sendme_period_s:
+            self._last_sendme_at = now
+            self.enqueue("sendme")
+
+    def tick(self):
+        self.sendme_tick()
+
+        now = time.monotonic()
+        if not self._txq:
+            return
+        if (now - self._last_tx_at) < self._tx_interval_s:
+            return
+
+        cmd = self._txq.pop(0)
+        try:
+            self.uart.write(cmd.encode("ascii", "replace") + TERM)
+            self._last_tx_at = now
+        except Exception as e:
+            dprint("[NX] write err:", e)
+
+    def _read_more(self):
+        try:
+            n = getattr(self.uart, "in_waiting", 0) or 0
+            chunk = self.uart.read(min(256, n)) if n else None
+        except Exception as e:
+            dprint("[NX] read err:", e)
+            return
+        if chunk:
+            self._rx.extend(chunk)
+
+    def _pop_frame(self):
+        i = self._rx.find(TERM)
+        if i < 0:
             return None
-        
-        # Read header
-        header = self.uart.read(1)
-        if not header or header[0] != EVT_HEADER:
-            return None
-        
-        # Read length
-        length_byte = self.uart.read(1)
-        if not length_byte:
-            return None
-        length = length_byte[0]
-        
-        # Read opcode
-        opcode_byte = self.uart.read(1)
-        if not opcode_byte:
-            return None
-        opcode = opcode_byte[0]
-        
-        # Read parameters
-        param_length = length - 2  # length includes opcode and checksum
-        if param_length > 0:
-            params = self.uart.read(param_length)
-            if not params or len(params) != param_length:
-                return None
-        else:
-            params = []
-        
-        # Read checksum
-        checksum_byte = self.uart.read(1)
-        if not checksum_byte:
-            return None
-        checksum = checksum_byte[0]
-        
-        return Frame(header[0], length, opcode, list(params), checksum)
-    
-    def mmi_action(self, action):
-        """
-        Send MMI action command
-        
-        Args:
-            action: MMI action code
-        """
-        self.send_command(CMD_MMI_ACTION, [action])
-    
-    def make_call(self, phone_number):
-        """
-        Make a call to specified phone number
-        
-        Args:
-            phone_number: Phone number string
-        """
-        params = [len(phone_number)] + [ord(c) for c in phone_number]
-        self.send_command(CMD_MAKE_CALL, params)
-    
-    def music_control(self, action):
-        """
-        Send music control command
-        
-        Args:
-            action: Music control action (0x00-0x0E)
-        """
-        self.send_command(CMD_MUSIC_CONTROL, [action])
-    
-    def read_btm_version(self):
-        """Request BTM firmware version"""
-        self.send_command(CMD_READ_BTM_VERSION)
-    
-    def read_link_status(self):
-        """Request current link status"""
-        self.send_command(CMD_READ_LINK_STATUS)
-    
-    def read_local_bd_address(self):
-        """Request local Bluetooth device address"""
-        self.send_command(CMD_READ_LOCAL_BD_ADDRESS)
-    
-    def read_local_device_name(self):
-        """Request local device name"""
-        self.send_command(CMD_READ_LOCAL_DEVICE_NAME)
+        frame = bytes(self._rx[:i])
+        self._rx = self._rx[i + 3 :]
+        return frame
+
+    @staticmethod
+    def _is_token_frame(frame):
+        f = frame.strip()
+        if not f:
+            return False
+        for b in f:
+            if 48 <= b <= 57:
+                continue
+            if 65 <= b <= 90:
+                continue
+            if b == 95:
+                continue
+            return False
+        return f in TOKENS
+
+    def read(self, max_tokens=6, debounce_s=0.10):
+        tokens = []
+        page_changed = False
+
+        self._read_more()
+        while True:
+            frame = self._pop_frame()
+            if frame is None:
+                break
+
+            if len(frame) >= 2 and frame[0] == 0x66:
+                pageid = frame[1]
+                if self.current_page != pageid:
+                    self.current_page = pageid
+                    page_changed = True
+                continue
+
+            if self._is_token_frame(frame):
+                now = time.monotonic()
+                if self._last_token == frame and (now - self._last_token_at) < debounce_s:
+                    continue
+                self._last_token = frame
+                self._last_token_at = now
+                tokens.append(frame)
+                if len(tokens) >= max_tokens:
+                    break
+
+        return tokens, page_changed
+
+    def set_text_active_page(self, obj, txt):
+        safe = _sanitize_text(txt)
+        self.enqueue('%s.txt="%s"' % (obj, safe))
 
 
-def bm83_frame(opcode, body):
-    """
-    Create a BM83 command frame with proper checksum
-    
-    Frame structure:
-    - Start byte (0xAA)
-    - Length (length of opcode + parameters + checksum)
-    - Opcode
-    - Parameters
-    - Checksum
-    
-    Args:
-        opcode: Command opcode byte
-        body: List of parameter bytes
-    
-    Returns:
-        Complete frame as bytes
-    """
-    hi = CMD_HEADER
-    lo = len(body) + 2  # length = parameters + opcode + checksum
-    s = sum(body) & 0xFF
-    chk = ((~s + 1) & 0xFF)
-    return bytes([hi, lo, opcode] + body + [chk])
+# ---------------- BLE HID ----------------
+class BleHid:
+    def __init__(self, enabled, name):
+        self.enabled = enabled
+        self.name = name
+        self._ble = None
+        self._adv = None
+        self._cc = None
+        self._ready = False
+        self._next_adv_at = 0.0
+
+    def setup(self):
+        if not self.enabled:
+            return
+        try:
+            from adafruit_ble import BLERadio
+            from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
+            from adafruit_ble.services.standard.hid import HIDService
+            from adafruit_hid.consumer_control import ConsumerControl
+
+            self._ble = BLERadio()
+            self._ble.name = self.name
+            hid = HIDService()
+            self._adv = ProvideServicesAdvertisement(hid)
+            self._cc = ConsumerControl(hid.devices)
+            self._ready = True
+            print("[BLE] Ready:", self.name)
+            self._start_adv(force=True)
+        except Exception as e:
+            print("[BLE] Disabled:", e)
+            self._ready = False
+
+    def _start_adv(self, force=False):
+        if not self._ready or not self._ble or not self._adv:
+            return
+        if self._ble.connected:
+            return
+        try:
+            if (not force) and getattr(self._ble, "advertising", False):
+                return
+        except Exception:
+            pass
+        now = time.monotonic()
+        if (not force) and now < self._next_adv_at:
+            return
+        try:
+            self._ble.start_advertising(self._adv)
+            self._next_adv_at = now + 0.2
+        except Exception as e:
+            msg = str(e)
+            if "Nimble" in msg or "memory" in msg.lower():
+                self._next_adv_at = now + 10.0
+                return
+            self._next_adv_at = now + 5.0
+            dprint("[BLE] adv err:", e)
+
+    def tick(self):
+        self._start_adv(force=False)
+
+    def _send_ccc(self, code):
+        if not self._ready or not self._ble or not self._cc:
+            return
+        if not self._ble.connected:
+            return
+        try:
+            self._cc.send(code)
+        except Exception as e:
+            print("[BLE] send fail:", e)
+
+    def volume(self, up):
+        from adafruit_hid.consumer_control_code import ConsumerControlCode as CCC
+        self._send_ccc(CCC.VOLUME_INCREMENT if up else CCC.VOLUME_DECREMENT)
+
+    def mute(self):
+        from adafruit_hid.consumer_control_code import ConsumerControlCode as CCC
+        self._send_ccc(CCC.MUTE)
 
 
-def parse_event(frame):
-    """
-    Parse BM83 event frame
-    
-    Args:
-        frame: Frame namedtuple
-    
-    Returns:
-        Dictionary with parsed event data
-    """
-    event_data = {
-        'opcode': frame.opcode,
-        'params': frame.params
+# ---------------- BM83 ----------------
+class Bm83:
+    OP_MMI_ACTION = 0x02
+    OP_EVENT_FILTER = 0x03
+    OP_MUSIC_CONTROL = 0x04
+    OP_AVC_VENDOR_CMD = 0x0B
+    OP_READ_BD_ADDR = 0x0F
+    OP_BTM_UTILITY_FUNC = 0x13
+    OP_EVENT_ACK = 0x14
+    OP_EQ_MODE_SETTING = 0x1C
+    OP_AVRCP_VENDOR_DEP_CMD = 0x4A
+
+    EVT_BTM_STATUS = 0x01
+    EVT_EQ_MODE_IND = 0x10
+    EVT_AVC_VENDOR_RSP = 0x1A
+    EVT_AVRCP_VENDOR_DEP_RSP = 0x5D
+
+    MMI_POWER_ON_PRESS = 0x51
+    MMI_POWER_ON_RELEASE = 0x52
+    MMI_POWER_OFF_PRESS = 0x53
+    MMI_POWER_OFF_RELEASE = 0x54
+    MMI_ENTER_PAIRING = 0x5D
+
+    MC_PLAY_PAUSE = 0x07
+    MC_PREV = 0x0A
+
+    EQ_SEQ = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11)
+    EQ_L = {
+        0: "OFF",
+        1: "SOFT",
+        2: "BASS",
+        3: "TREBLE",
+        4: "CLASSICAL",
+        5: "ROCK",
+        6: "JAZZ",
+        7: "POP",
+        8: "DANCE",
+        9: "RNB",
+        11: "USER",
     }
-    
-    # Add specific parsing for different event types
-    if frame.opcode == EVT_COMMAND_ACK:
-        if len(frame.params) >= 2:
-            event_data['ack_command'] = frame.params[0]
-            event_data['ack_status'] = frame.params[1]
-    
-    elif frame.opcode == EVT_BTM_STATUS:
-        if len(frame.params) >= 1:
-            event_data['btm_status'] = frame.params[0]
-    
-    elif frame.opcode == EVT_CALL_STATUS:
-        if len(frame.params) >= 2:
-            event_data['database_index'] = frame.params[0]
-            event_data['call_status'] = frame.params[1]
-    
-    return event_data
+    CONNECTED_STATES = (0x06, 0x0B, 0x82, 0x64, 0x65, 0x66)
+
+    def __init__(self, uart):
+        self.uart = uart
+        self._rx = bytearray()
+
+        self.power_on = False
+        self.eq_index = 0
+
+        self.connected = False
+        self._last_connected_seen = 0.0
+        self._disconnect_hold_s = 2.0
+
+        self._next_playstatus_at = 0.0
+        self._playstatus_period_s = 1.0
+
+        self._next_attrs_at = 0.0
+        self._attrs_throttle_s = 1.5
+        self._last_attrs_req_at = 0.0
+
+        self._gea_frag = bytearray()
+        self._gea_expect_len = None
+
+    @staticmethod
+    def _checksum(hi, lo, body):
+        return (-((hi + lo + sum(body)) & 0xFF)) & 0xFF
+
+    def _frame(self, op, params=b""):
+        body = bytes([op]) + params
+        ln = len(body)
+        hi, lo = (ln >> 8) & 0xFF, ln & 0xFF
+        chk = self._checksum(hi, lo, body)
+        return bytes([0xAA, hi, lo]) + body + bytes([chk])
+
+    def send(self, op, params=b""):
+        pkt = self._frame(op, params)
+        dprint("[BM83 TX]", " ".join("%02X" % b for b in pkt))
+        try:
+            self.uart.write(pkt)
+        except Exception as e:
+            print("[BM83] write err:", e)
+
+    def ack_event(self, event_op):
+        if event_op == 0x00:
+            return
+        self.send(self.OP_EVENT_ACK, bytes([event_op & 0xFF]))
+
+    def poll(self, max_read=768):
+        out = []
+        try:
+            n = getattr(self.uart, "in_waiting", 0) or 0
+            chunk = self.uart.read(min(max_read, n)) if n else None
+        except Exception as e:
+            dprint("[BM83] read err:", e)
+            return out
+
+        if chunk:
+            self._rx.extend(chunk)
+
+        while True:
+            if len(self._rx) < 4:
+                break
+            sof = self._rx.find(b"\xAA")
+            if sof < 0:
+                self._rx.clear()
+                break
+            if sof > 0:
+                self._rx = self._rx[sof:]
+            if len(self._rx) < 4:
+                break
+
+            hi, lo = self._rx[1], self._rx[2]
+            ln = (hi << 8) | lo
+            total = 3 + ln + 1
+            if len(self._rx) < total:
+                break
+
+            body = bytes(self._rx[3 : 3 + ln])
+            chk = self._rx[3 + ln]
+            if chk != self._checksum(hi, lo, body):
+                self._rx = self._rx[1:]
+                continue
+
+            op = body[0]
+            params = body[1:]
+            dprint("[BM83 EVT] op=0x%02X len=%d data=" % (op, len(params)), " ".join("%02X" % b for b in params))
+            out.append((op, params))
+            self._rx = self._rx[total:]
+
+        return out
+
+    def init_link(self):
+        self.send(self.OP_READ_BD_ADDR)
+        self.send(self.OP_EVENT_FILTER, b"\x00\x00\x00\x00")
+        self.send(self.OP_BTM_UTILITY_FUNC, b"\x03\x01")
+        print("[BM83] Link initialized")
+
+    def power_on_cmd(self):
+        self.send(self.OP_MMI_ACTION, bytes([0x00, self.MMI_POWER_ON_PRESS]))
+        time.sleep(0.2)
+        self.send(self.OP_MMI_ACTION, bytes([0x00, self.MMI_POWER_ON_RELEASE]))
+        time.sleep(0.5)
+        self.init_link()
+        self.power_on = True
+        print("[POWER] ON (UART)")
+
+    def power_off_cmd(self):
+        self.send(self.OP_MMI_ACTION, bytes([0x00, self.MMI_POWER_OFF_PRESS]))
+        time.sleep(1.5)
+        self.send(self.OP_MMI_ACTION, bytes([0x00, self.MMI_POWER_OFF_RELEASE]))
+        self.power_on = False
+        self.connected = False
+        print("[POWER] OFF (UART)")
+
+    def power_toggle(self):
+        self.power_off_cmd() if self.power_on else self.power_on_cmd()
+
+    def pair(self):
+        self.send(self.OP_MMI_ACTION, bytes([0x00, self.MMI_ENTER_PAIRING]))
+        print("[PAIR] Enter pairing")
+
+    def play_pause(self):
+        self.send(self.OP_MUSIC_CONTROL, bytes([0x00, self.MC_PLAY_PAUSE]))
+        print("[PLAY/PAUSE] toggled")
+
+    def prev(self):
+        self.send(self.OP_MUSIC_CONTROL, bytes([0x00, self.MC_PREV]))
+        print("[PREV] triggered")
+
+    def next_eq(self):
+        self.eq_index = (self.eq_index + 1) % len(self.EQ_SEQ)
+        mode = self.EQ_SEQ[self.eq_index]
+        self.send(self.OP_EQ_MODE_SETTING, bytes([mode, 0x00]))
+        return mode
+
+    def note_btm_state(self, state):
+        now = time.monotonic()
+        if state in self.CONNECTED_STATES:
+            self._last_connected_seen = now
+            if not self.connected:
+                self.connected = True
+                return "CONNECTED"
+            return None
+        if self.connected and (now - self._last_connected_seen) > self._disconnect_hold_s:
+            self.connected = False
+            return "DISCONNECTED"
+        return None
+
+    @staticmethod
+    def _avc_payload(pdu, params):
+        return bytes([pdu, 0x00]) + len(params).to_bytes(2, "big") + params
+
+    def avrcp_get_play_status(self, db=0):
+        self.send(self.OP_AVC_VENDOR_CMD, bytes([db]) + self._avc_payload(0x30, b""))
+
+    def avrcp_register_notification(self, event_id, interval_s=0, db=0):
+        params = bytes([event_id]) + int(interval_s).to_bytes(4, "big")
+        self.send(self.OP_AVC_VENDOR_CMD, bytes([db]) + self._avc_payload(0x31, params))
+
+    def avrcp_get_element_attributes(self, db=0):
+        attr_ids = (1, 2, 3, 6, 4, 5, 7)
+        p = bytes([len(attr_ids)])
+        for a in attr_ids:
+            p += int(a).to_bytes(4, "big")
+        self.send(self.OP_AVRCP_VENDOR_DEP_CMD, bytes([db, 0x20]) + p)
+
+    def schedule_attrs(self, delay_s=0.35):
+        now = time.monotonic()
+        if (now - self._last_attrs_req_at) < self._attrs_throttle_s:
+            return
+        t = now + delay_s
+        if self._next_attrs_at == 0.0 or t < self._next_attrs_at:
+            self._next_attrs_at = t
+
+    def tick_avrcp(self):
+        if not self.connected:
+            return
+        now = time.monotonic()
+        if now >= self._next_playstatus_at:
+            self.avrcp_get_play_status(0)
+            self._next_playstatus_at = now + self._playstatus_period_s
+        if self._next_attrs_at and now >= self._next_attrs_at:
+            self._last_attrs_req_at = now
+            self._next_attrs_at = 0.0
+            self.avrcp_get_element_attributes(0)
+
+    @staticmethod
+    def parse_avc_vendor_rsp(params):
+        if len(params) < 1 + 10:
+            return None
+        db = params[0]
+        p = params[1:]
+        pdu = p[6]
+        pkt_type = p[7]
+        plen = int.from_bytes(p[8:10], "big")
+        if len(p) < 10 + plen:
+            return None
+        return db, pdu, pkt_type, p[10 : 10 + plen]
+
+    def parse_gea_0x5d(self, params):
+        if len(params) < 2:
+            return None
+        pdu_id = params[0]
+        payload = params[2:]
+        if pdu_id != 0x20 or len(payload) < 5:
+            return None
+
+        resp = payload[0]
+        is_end = payload[1]
+        attr_num = payload[2]
+        total_len = int.from_bytes(payload[3:5], "big")
+        part = payload[5:]
+
+        if self._gea_expect_len is None:
+            self._gea_expect_len = total_len
+            self._gea_frag = bytearray()
+        self._gea_frag.extend(part)
+
+        if is_end != 0x01:
+            return None
+
+        full = bytes(self._gea_frag[: self._gea_expect_len])
+        self._gea_frag = bytearray()
+        self._gea_expect_len = None
+
+        attrs = {}
+        idx = 0
+        for _ in range(attr_num):
+            if idx + 8 > len(full):
+                break
+            aid = int.from_bytes(full[idx : idx + 4], "big")
+            vlen = int.from_bytes(full[idx + 6 : idx + 8], "big")
+            val = full[idx + 8 : idx + 8 + vlen]
+            idx += 8 + vlen
+            try:
+                s = val.decode("utf-8", "replace").strip()
+            except Exception:
+                s = "".join(chr(b) if 32 <= b <= 126 else " " for b in val).strip()
+            attrs[aid] = s
+        return resp, attrs
 
 
-# Main test code
-if __name__ == "__main__":
-    # Initialize BM83 with UART pins
-    # Adjust pins according to your board configuration
-    bm83 = BM83(board.TX, board.RX)
-    
-    print("BM83 Controller initialized")
-    print("Requesting BTM version...")
-    bm83.read_btm_version()
-    
-    # Main event loop
+# ---------------- Main ----------------
+def main():
+    gc.collect()
+
+    nx_uart = busio.UART(NX_TX, NX_RX, baudrate=NX_BAUD, timeout=0.0, receiver_buffer_size=1024)
+    bm_uart = busio.UART(BM83_TX, BM83_RX, baudrate=BM83_BAUD, timeout=0.0, receiver_buffer_size=8192)
+
+    nx = Nextion(nx_uart)
+    bm = Bm83(bm_uart)
+
+    ble = BleHid(BLE_ENABLED, BLE_NAME)
+    ble.setup()
+
+    print("=== ESP32-S3 BM83 + Nextion + BLE HID (VOLUME ONLY) ===")
+
+    nx.boot_sync(0.9)
+
+    desired_eq = "OFF"
+    desired_meta = {k: "—" for k in NX_RUNTIME.keys()}
+
+    # Play-status based track-change detection
+    last_pos_ms = None
+    last_total_ms = None
+
+    # iOS mute assist
+    last_voldn_at = 0.0
+    mute_window_s = 0.35
+
+    def flush_page(pageid):
+        if pageid == 0:
+            nx.set_text_active_page(EQ_OBJ_PAGE0, desired_eq)
+        elif pageid == 1:
+            nx.set_text_active_page(EQ_OBJ_PAGE1, desired_eq)
+            for k, obj in NX_RUNTIME.items():
+                nx.set_text_active_page(obj, desired_meta.get(k, "—"))
+
+    def maybe_track_changed(pos_ms, total_ms):
+        nonlocal last_pos_ms, last_total_ms
+
+        if pos_ms is None or total_ms is None:
+            last_pos_ms = pos_ms
+            last_total_ms = total_ms
+            return False
+
+        changed = False
+
+        # total length change is a strong signal (common on track change)
+        if last_total_ms is not None and total_ms > 0 and last_total_ms > 0 and total_ms != last_total_ms:
+            changed = True
+
+        # position reset (big drop and new pos near the start)
+        if last_pos_ms is not None:
+            if (pos_ms + 2500) < last_pos_ms and pos_ms < 3000:
+                changed = True
+
+        last_pos_ms = pos_ms
+        last_total_ms = total_ms
+        return changed
+
+    last_gc = time.monotonic()
+
     while True:
-        event = bm83.read_event()
-        if event:
-            parsed = parse_event(event)
-            print(f"Event received: {parsed}")
-        
-        time.sleep(0.1)
+        now = time.monotonic()
+
+        if now - last_gc > 8.0:
+            gc.collect()
+            last_gc = now
+
+        nx.tick()
+        tokens, page_changed = nx.read()
+
+        if page_changed and nx.current_page is not None:
+            dprint("[NX] page=", nx.current_page)
+            flush_page(nx.current_page)
+
+        ble.tick()
+
+        bm.tick_avrcp()
+        for op, params in bm.poll():
+            bm.ack_event(op)
+
+            if op == bm.EVT_BTM_STATUS and params:
+                state = params[0]
+                print("[BTM_Status] state=0x%02X" % state)
+                change = bm.note_btm_state(state)
+                if change == "CONNECTED":
+                    print("[BTM] Connected -> register notifications + request metadata")
+                    bm.avrcp_register_notification(0x01, interval_s=1)  # play status
+                    bm.avrcp_register_notification(0x02, interval_s=0)  # track changed
+                    bm.avrcp_register_notification(0x05, interval_s=1)  # pos changed
+                    bm._next_playstatus_at = 0.0
+                    bm.schedule_attrs(0.8)
+
+            elif op == bm.EVT_EQ_MODE_IND and params:
+                mode = params[0]
+                desired_eq = bm.EQ_L.get(mode, "OFF")
+                dprint("[EQ_IND] mode=%d label=%s" % (mode, desired_eq))
+                if nx.current_page is not None:
+                    flush_page(nx.current_page)
+
+            elif op == bm.EVT_AVC_VENDOR_RSP:
+                parsed = bm.parse_avc_vendor_rsp(params)
+                if not parsed:
+                    continue
+                _db, pdu, pkt_type, avp = parsed
+                if pkt_type != 0x00:
+                    continue
+
+                if pdu == 0x30 and len(avp) >= 9:
+                    total_ms = int.from_bytes(avp[0:4], "big")
+                    pos_ms = int.from_bytes(avp[4:8], "big")
+
+                    desired_meta["time_cur"] = _fmt_ms(pos_ms)
+                    if total_ms > 0:
+                        desired_meta["time"] = _fmt_ms(total_ms)
+
+                    if maybe_track_changed(pos_ms, total_ms):
+                        dprint("[TRACK] inferred change -> request metadata")
+                        bm.schedule_attrs(0.25)
+
+                    if nx.current_page == 1:
+                        flush_page(1)
+
+                elif pdu == 0x31 and len(avp) >= 1:
+                    # Keep this (some stacks do send TrackChanged reliably)
+                    event_id = avp[0]
+                    if event_id == 0x02:
+                        dprint("[AVRCP] TrackChanged -> request metadata")
+                        bm.schedule_attrs(0.25)
+                        # Re-register so future notifications keep coming
+                        bm.avrcp_register_notification(0x02, interval_s=0)
+                    elif event_id == 0x05 and len(avp) >= 5:
+                        pos = int.from_bytes(avp[1:5], "big")
+                        desired_meta["time_cur"] = _fmt_ms(pos)
+                        if nx.current_page == 1:
+                            flush_page(1)
+
+            elif op == bm.EVT_AVRCP_VENDOR_DEP_RSP:
+                gea = bm.parse_gea_0x5d(params)
+                if gea:
+                    _resp, attrs = gea
+                    print("[META] GetElementAttributes received:", sorted(attrs.keys()))
+
+                    if 1 in attrs:
+                        desired_meta["title"] = _sanitize_text(attrs[1])
+                    if 2 in attrs:
+                        desired_meta["artist"] = _sanitize_text(attrs[2])
+                    if 3 in attrs:
+                        desired_meta["album"] = _sanitize_text(attrs[3])
+                    if 6 in attrs:
+                        desired_meta["genre"] = _sanitize_text(attrs[6])
+                    if 4 in attrs:
+                        desired_meta["track_num"] = _sanitize_text(attrs[4], max_len=8)
+                    if 5 in attrs:
+                        desired_meta["total_tracks"] = _sanitize_text(attrs[5], max_len=8)
+                    if 7 in attrs:
+                        desired_meta["time"] = _fmt_ms(attrs[7])
+
+                    if nx.current_page == 1:
+                        flush_page(1)
+
+        for tok in tokens:
+            dprint("[NX] Token:", tok)
+
+            if tok == b"BT_POWER":
+                bm.power_toggle()
+            elif tok == b"BT_PAIR":
+                bm.pair()
+            elif tok == b"BT_PLAY":
+                bm.play_pause()
+            elif tok == b"BT_PREV":
+                bm.prev()
+            elif tok == b"BT_NEXT":
+                mode = bm.next_eq()
+                desired_eq = bm.EQ_L.get(mode, "OFF")
+                print("[EQ] set to", desired_eq)
+                if nx.current_page is not None:
+                    flush_page(nx.current_page)
+            elif tok == b"BT_VOLUP":
+                ble.volume(True)
+            elif tok == b"BT_VOLDN":
+                if (now - last_voldn_at) <= mute_window_s:
+                    ble.mute()
+                    last_voldn_at = 0.0
+                else:
+                    ble.volume(False)
+                    last_voldn_at = now
+
+        time.sleep(0.005)
+
+
+main()
