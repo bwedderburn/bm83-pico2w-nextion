@@ -1,27 +1,62 @@
-# BM83 + Pico 2 W + Nextion
+# BM83-ESP32-S3-Nextion
 
-- **Pico 2 W** runs CircuitPython and bridges **Nextion UART** → **BM83 Host UART**.
-- Supports tokens: `BT_POWER`, `BT_PAIR`, `BT_PLAY`, `BT_NEXT`, `BT_PREV`, `BT_VOLUP`, `BT_VOLDN`.
-- BM83 UART @115200; Nextion @9600 (adjust in `code.py` if needed).
+ESP32-S3 DevKitC-1 + Microchip BM83 + Nextion NX3224F028.
 
-## Wiring (defaults)
-- BM83 Host UART: **GP12 (TX) → BM83 RX**, **GP13 (RX) ← BM83 TX**, GND↔GND
-- Nextion: **GP8 (TX) → NX RX**, **GP9 (RX) ← NX TX**, GND↔GND
-- Optional: **BM83 UART_TX_IND → Pico GP22** (input) for activity debug
+This project is a host/controller for a **BM83** Bluetooth audio module with a **Nextion** UART HMI, plus optional **BLE HID** (volume/mute).
 
-## Getting started
-1. Flash **CircuitPython** to the Pico 2 W (UF2).
-2. Copy `firmware/circuitpython/code.py` to the `CIRCUITPY` drive (rename to `code.py` if needed).
-3. Open a serial terminal to the Pico and watch logs.
+## CircuitPython firmware
 
-## Display offset and live time
-- The firmware applies a TIME_OFFSET_MS (default 12000 ms) to the on-screen live position (tTIME_CUR) to compensate for display lag.
-- You can change TIME_OFFSET_MS in `code.py` near the top of the file.
+CircuitPython sources live in:
 
-## Linting / CI
-- CI uses flake8. To run locally:
-  - flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-  - flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+- `firmware/circuitpython/`
+
+The main entrypoint is `firmware/circuitpython/code.py`.
+
+### Supported Nextion tokens
+
+The UI sends these tokens (terminated by `0xFF 0xFF 0xFF`):
+
+- `BT_POWER`, `BT_POWEROFF`, `BT_PAIR`
+- `BT_PLAY`, `BT_PREV`, `BT_NEXT`
+- `BT_VOLUP`, `BT_VOLDN`
+
+### UART settings (defaults)
+
+- Nextion UART: **9600**
+- BM83 Host UART: **115200**
+
+### Wiring (ESP32-S3 defaults)
+
+`code.py` defaults:
+
+- Nextion UART: `board.IO15` (TX) and `board.IO16` (RX)
+- BM83 UART: `board.IO17` (TX) and `board.IO18` (RX)
+
+Ensure all devices share **GND**.
+
+## BLE HID (optional)
+
+BLE HID is optional and used for **volume up/down** and **mute**.
+
+If BLE libraries are missing at runtime, the firmware should continue without BLE and print a message.
+
+## Development / CI
+
+CI runs lint + unit tests for the CircuitPython modules using CPython:
+
+- `ruff`
+- `pytest`
+
+Local commands:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+ruff check .
+pytest -q
+```
 
 ## License
-This project is provided under the MIT License. See LICENSE for details.
+
+MIT License. See `LICENSE`.
