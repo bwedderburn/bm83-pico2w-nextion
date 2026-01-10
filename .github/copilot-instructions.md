@@ -1,158 +1,129 @@
 # GitHub Copilot Instructions for BM83-ESP32-S3-Nextion
 
 ## Project Overview
-This repository contains firmware and hardware files for a Raspberry Pi Pico 2 W bridge that host-controls a Microchip BM83 Bluetooth audio module over UART. The system parses Nextion HMI tokens and optionally routes audio via an Adafruit UDA1334A I²S DAC with BM83 line-in detect (P3.2) and mute synchronization.
+This repository contains CircuitPython firmware for an **ESP32-S3** board that host-controls a **Microchip BM83 Bluetooth audio module** over UART, integrates a **Nextion HMI display** over UART, and optionally provides **BLE HID ConsumerControl** for volume/mute.
+
+The main entrypoint is:
+- `firmware/circuitpython/code.py`
+
+Supporting modules live under:
+- `firmware/circuitpython/`
 
 ## Technology Stack
-- **Language**: Python (100%)
-- **Platform**: CircuitPython on Raspberry Pi Pico 2 W
-- **Hardware Components**:
-  - Microchip BM83 Bluetooth module
-  - Nextion HMI display
-  - Adafruit UDA1334A I²S DAC
-  - Raspberry Pi Pico 2 W
+- **Language**: Python (CircuitPython style; runs on-device)
+- **Platform**: CircuitPython 10.x
+- **Hardware/Protocols**:
+  - BM83 UART framing + parsing (binary protocol, checksum)
+  - Nextion UART token parsing + command sending (`0xFF 0xFF 0xFF` terminator)
+  - Optional BLE HID ConsumerControl (volume/mute)
+  - Optional I²S DAC integration (e.g., UDA1334A), depending on firmware usage
 
-## Code Structure
-- `firmware/circuitpython/code.py`: Main firmware implementation
-- `.github/workflows/python-package.yml`: CI/CD pipeline with flake8 linting and pytest
-- `tests/`: Unit tests for firmware code
-- `Documents/`: Hardware datasheets and reference materials
+## Code Structure (authoritative)
+All modules below are located in `firmware/circuitpython/`:
+- `code.py`: main runtime / event loop / orchestration
+- `bm83.py`: BM83 UART framing, parsing, AVRCP helpers, EQ syncing
+- `nextion.py`: Nextion protocol, token parsing, command queue, polling (`sendme`)
+- `ble_hid.py`: optional BLE HID ConsumerControl helper
+- `utils.py`: shared helpers like `sanitize_text()` and `fmt_ms()`
 
-## Core Commands
+Tests:
+- `tests/`: unit tests run in CI (host Python)
 
-### Linting
+CI:
+- `.github/workflows/python-package.yml`: runs **flake8** and **pytest**
+
+## Core Commands (match CI)
+### Install (local dev)
 ```bash
-# Check for syntax errors and undefined names (strict - will fail build)
+python -m pip install --upgrade pip
+python -m pip install flake8 pytest
+```
+
+### Linting (CI-compatible)
+```bash
+# Fail on syntax errors / undefined names
 flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 
-# Check for style issues and complexity (warnings only)
+# Style-only pass (warnings)
 flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 ```
 
 ### Testing
 ```bash
-# Run all tests
 pytest
-
-# Run tests with verbose output
 pytest -v
-
-# Run specific test file
-pytest tests/test_code.py
-```
-
-### Installation
-```bash
-# Install development dependencies
-python -m pip install --upgrade pip
-python -m pip install flake8 pytest
 ```
 
 ## Coding Standards
-- **Linting**: Strict flake8 compliance required
-  - Error codes checked: E9, F63, F7, F82
-  - Max line length: 127 characters
-  - Max complexity: 10
-- **Python Style**:
-  - Use type hints (from `__future__ import annotations`)
-  - Follow PEP 8 conventions
-  - Use descriptive variable names
-  - Include docstrings for functions
+- Keep code compatible with CircuitPython constraints:
+  - prefer simple control flow and low allocation in hot loops
+  - avoid heavy imports or patterns that assume CPython-only modules
+- **PEP 8**, max line length **127**
+- Prefer small, testable functions (protocol parsing is a great unit-test target)
+- Add docstrings for public helpers and for protocol parsing/encoding functions
+- Use descriptive names; keep protocol constants centralized and documented
 
 ## Key Patterns & Conventions
-- **Global variables** prefixed with underscore (e.g., `_power_on`, `_is_playing`)
-- **Only declare variables as `global` if they are assigned within the function** (not just read)
-- **UART communication**: Use `busio.UART` from CircuitPython
-- **BM83 protocol**: Frame structure with checksum validation (0xAA header)
-- **Nextion commands**: ASCII strings terminated with `\xFF\xFF\xFF`
-- **Event handling**: Non-blocking read with timeouts
-- **EQ modes**: 0-10 (OFF, SOFT, BASS, TREBLE, CLASSICAL, ROCK, JAZZ, POP, DANCE, RNB, USER)
+### Global state
+- If you must use global variables in `code.py` (common in CircuitPython), follow this rule:
+  - **Only declare `global x` inside a function if that function assigns to `x`.**
+  - Reading a global does **not** need a `global` statement.
 
-## Common Operations
-- **BM83 Commands**: Use `bm83_send()` with proper opcode and payload
-- **Nextion Updates**: Use `nx_send_cmd()` with string commands
-- **AVRCP Metadata**: Parse with `_parse_avrcp_metadata_block()`
-- **Play/Pause State**: Manage timing with `_current_pos_ms` and `_pos_start_monotonic`
+### UART protocols
+- **BM83**
+  - treat framing/parsing as a strict binary protocol
+  - validate lengths and checksums before acting on frames
+  - keep parsing resilient: ignore/skip bad frames rather than crashing
+- **Nextion**
+  - commands are ASCII and must be terminated with `\xFF\xFF\xFF`
+  - sanitize any user/device-provided text before sending to the display
+  - parsing should be non-blocking and tolerant of partial tokens
 
-## Testing
-- Tests located in `tests/` directory
-- CI runs pytest automatically
-- All code must pass flake8 validation before merge
+### Runtime/event loop
+- Maintain a **non-blocking** main loop:
+  - do not add long sleeps or blocking reads
+  - handle timeouts and partial UART reads gracefully
+  - keep state machines explicit (especially play/pause timing and metadata updates)
 
-## Hardware-Specific Notes
-- **GPIO Pins**:
-  - BM83 UART: GP12 (TX), GP13 (RX) @ 115200 baud
-  - Nextion UART: GP8 (TX), GP9 (RX) @ 9600 baud
-- **BM83 Power Control**: MMI press/release sequences (0x51/0x52 for ON, 0x53/0x54 for OFF)
-- **Line-in Detection**: P3.2 on BM83 module
-- **Audio Routing**: Optional I²S DAC with mute synchronization
+## Common Operations (preferred entry points)
+- Sending BM83 commands: use the canonical send helper in `bm83.py` (don’t duplicate framing logic)
+- Updating Nextion UI: use the helper methods in `nextion.py` (don’t hand-roll terminators everywhere)
+- Formatting/sanitizing UI text: use `utils.py` helpers (`sanitize_text()`, etc.)
+- BLE HID volume/mute: use `ble_hid.py` helper rather than inlining HID reports
 
 ## Common Pitfalls to Avoid
-1. **Don't declare variables as `global` if only reading them** (causes F824 flake8 errors)
-2. **Always include checksum validation** for BM83 frames
-3. **Handle UART timeouts gracefully** (non-blocking reads)
-4. **Sanitize Nextion text** (remove CR/LF/quotes, limit length)
-5. **Track play/pause state carefully** for accurate time display
+1. Don’t declare `global` for read-only globals (flake8 will complain; also harms clarity).
+2. Don’t accept BM83 frames without checksum/length validation.
+3. Don’t block the event loop on UART reads; always handle timeouts/partial reads.
+4. Don’t send unsanitized strings to Nextion (quotes/CRLF/length can break commands).
+5. Don’t duplicate protocol constants/encoders across files—centralize in the relevant module.
 
-## Boundaries - DO NOT MODIFY
+## Boundaries / Files to Treat as Read-Only (unless explicitly requested)
+- `Documents/` (vendor datasheets, reference PDFs)
+- `.github/workflows/` (CI config)
+- `LICENSE`
+- `SECURITY.md`
 
-The following files and directories should **never** be modified by automated changes:
-- `Documents/` - Hardware datasheets and vendor-provided reference materials
-- `.github/workflows/` - CI/CD pipeline configuration (except with explicit permission)
-- `LICENSE` - Project license file
-- `SECURITY.md` - Security policy
-- Hardware design files (if present in future) - KiCad schematics, PCB layouts
+## Acceptance Criteria for Changes
+- `flake8` passes (strict pass + style pass as in CI)
+- `pytest` passes
+- Changes preserve protocol correctness and non-blocking behavior
+- If behavior changes, update `README.md` and/or inline docs where needed
+- New protocol parsing/encoding behavior should include unit tests where feasible
 
-## Acceptance Criteria
+## Examples
 
-All changes must meet the following criteria before merging:
-1. **Code Quality**:
-   - Pass all flake8 checks (both strict and style)
-   - No new warnings or errors introduced
-   - Maintain or improve code complexity scores
-
-2. **Testing**:
-   - All existing tests must pass
-   - New features should include unit tests
-   - Test coverage should not decrease
-
-3. **Documentation**:
-   - Update README.md if functionality changes
-   - Add/update docstrings for new/modified functions
-   - Document any new hardware interactions or protocols
-
-4. **Hardware Compatibility**:
-   - Changes must not break existing UART communication
-   - Maintain compatibility with BM83 protocol specification
-   - Preserve timing-critical operations
-
-## When Suggesting Changes
-- Ensure flake8 compliance (especially F824 for unused globals)
-- Maintain non-blocking event loop structure
-- Preserve existing timing and state management logic
-- Test UART communication changes thoroughly
-- Document hardware-specific behaviors
-
-## Example Code Pattern
-
-### Good: Reading a global variable (no `global` declaration needed)
+### Good: reading a global (no `global` declaration)
 ```python
-def check_power_status() -> bool:
-    """Check if BM83 is powered on."""
-    return _power_on  # Reading only - no global declaration
+def is_powered_on() -> bool:
+    """Return the last-known BM83 power state."""
+    return _power_on
 ```
 
-### Good: Modifying a global variable (requires `global` declaration)
+### Good: assigning a global (requires `global`)
 ```python
 def set_power_state(on: bool) -> None:
-    """Set BM83 power state."""
-    global _power_on  # Assigning - needs global declaration
+    """Update the cached BM83 power state."""
+    global _power_on
     _power_on = on
-```
-
-### BM83 Command Example
-```python
-def send_play_pause() -> None:
-    """Send play/pause command to BM83."""
-    bm83_send(OP_MUSIC_CONTROL, bytes([MC_PLAY_PAUSE]))
 ```
