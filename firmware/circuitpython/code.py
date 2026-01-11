@@ -12,6 +12,7 @@
 # ===========================================================
 
 import gc
+from collections import deque
 import time
 import board
 import busio
@@ -102,7 +103,7 @@ class Nextion:
         self._last_sendme_at = 0.0
         self._sendme_period_s = 0.5
 
-        self._txq = []
+        self._txq = deque()
         self._last_tx_at = 0.0
         self._tx_interval_s = 0.035
 
@@ -137,7 +138,7 @@ class Nextion:
         if (now - self._last_tx_at) < self._tx_interval_s:
             return
 
-        cmd = self._txq.pop(0)
+        cmd = self._txq.popleft()
         try:
             self.uart.write(cmd.encode("ascii", "replace") + TERM)
             self._last_tx_at = now
@@ -797,7 +798,5 @@ def main():
 
         time.sleep(0.005)
 
-
-main()
-
-
+if __name__ == "__main__":
+    main()
