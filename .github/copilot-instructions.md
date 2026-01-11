@@ -25,7 +25,7 @@ Supporting modules live under:
   - `Bm83` class: BM83 UART framing, parsing, AVRCP helpers, EQ syncing
   - `Nextion` class: Nextion protocol, token parsing, command queue, polling (`sendme`)
   - `BleHid` class: optional BLE HID ConsumerControl helper
-  - Utility functions: `_sanitize_text()`, `_fmt_ms()`, `hexdump()`, etc.
+  - Utility functions: `_sanitize_text()`, `_fmt_ms()`, etc.
 
 **Future modular structure** (referenced by tests but not yet implemented):
 - `bm83.py`: BM83 protocol handling
