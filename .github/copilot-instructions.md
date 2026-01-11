@@ -35,8 +35,8 @@ Supporting modules live under:
 
 Tests:
 - `tests/`: unit tests run in CI (host Python)
-- `tests/test_code.py`: tests for monolithic `code.py` (currently working)
-- `tests/test_modules.py`: tests for future modular structure (currently failing due to missing modules)
+- `tests/test_code.py`: tests for monolithic `code.py` - tests pure-Python helpers like protocol parsing, text sanitization, and frame construction (currently working)
+- `tests/test_modules.py`: tests for future modular structure - expects separate `utils.py`, `bm83.py`, `nextion.py` modules (currently failing due to missing modules)
 
 CI:
 - `.github/workflows/python-package.yml`: runs **flake8** and **pytest**
@@ -118,12 +118,11 @@ pytest -v
 When making changes to the firmware:
 1. **Understand the protocol first**: Review relevant documentation in `Documents/` for BM83 UART commands or Nextion display protocols
 2. **Lint early and often**: Run `flake8` after making changes to catch issues immediately
-3. **Test incrementally**: Run `pytest tests/test_code.py` to test pure-Python helpers (tests that work without CircuitPython hardware)
+3. **Test incrementally**: Run `pytest tests/test_code.py` to test pure-Python helpers (tests that work without CircuitPython hardware). Note: `tests/test_modules.py` will fail until the codebase is refactored into separate modules.
 4. **Manual testing on device**: CircuitPython code must ultimately be tested on actual ESP32-S3 hardware with connected peripherals
 5. **Keep changes small**: Focus on one protocol, one class, or one feature at a time
 6. **Document as you go**: Update inline comments and docstrings for any protocol parsing or state machine changes
 
-Note: `tests/test_modules.py` will fail until the codebase is refactored into separate modules. Focus on `tests/test_code.py` for now.
 ## Acceptance Criteria for Changes
 - `flake8` passes (strict pass + style pass as in CI)
 - `pytest tests/test_code.py` passes (note: `tests/test_modules.py` expected to fail until modular refactor)
