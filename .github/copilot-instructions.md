@@ -19,15 +19,24 @@ Supporting modules live under:
   - Optional I²S DAC integration (e.g., UDA1334A), depending on firmware usage
 
 ## Code Structure (authoritative)
-All modules below are located in `firmware/circuitpython/`:
-- `code.py`: main runtime / event loop / orchestration
-- `bm83.py`: BM83 UART framing, parsing, AVRCP helpers, EQ syncing
-- `nextion.py`: Nextion protocol, token parsing, command queue, polling (`sendme`)
-- `ble_hid.py`: optional BLE HID ConsumerControl helper
-- `utils.py`: shared helpers like `sanitize_text()` and `fmt_ms()`
+**Current implementation**: All code is in a single monolithic file:
+- `firmware/circuitpython/code.py`: Contains all functionality including:
+  - Main runtime / event loop / orchestration
+  - `Bm83` class: BM83 UART framing, parsing, AVRCP helpers, EQ syncing
+  - `Nextion` class: Nextion protocol, token parsing, command queue, polling (`sendme`)
+  - `BleHid` class: optional BLE HID ConsumerControl helper
+  - Utility functions: `_sanitize_text()`, `_fmt_ms()`, `hexdump()`, etc.
+
+**Future modular structure** (referenced by tests but not yet implemented):
+- `bm83.py`: BM83 protocol handling
+- `nextion.py`: Nextion protocol handling
+- `ble_hid.py`: BLE HID functionality
+- `utils.py`: shared utility functions
 
 Tests:
 - `tests/`: unit tests run in CI (host Python)
+- `tests/test_code.py`: tests for monolithic `code.py` (currently working)
+- `tests/test_modules.py`: tests for future modular structure (currently failing due to missing modules)
 
 CI:
 - `.github/workflows/python-package.yml`: runs **flake8** and **pytest**
@@ -86,17 +95,17 @@ pytest -v
   - keep state machines explicit (especially play/pause timing and metadata updates)
 
 ## Common Operations (preferred entry points)
-- Sending BM83 commands: use the canonical send helper in `bm83.py` (don’t duplicate framing logic)
-- Updating Nextion UI: use the helper methods in `nextion.py` (don’t hand-roll terminators everywhere)
-- Formatting/sanitizing UI text: use `utils.py` helpers (`sanitize_text()`, etc.)
-- BLE HID volume/mute: use `ble_hid.py` helper rather than inlining HID reports
+- Sending BM83 commands: use the `Bm83.send()` method in `code.py` (don't duplicate framing logic)
+- Updating Nextion UI: use the `Nextion` class methods in `code.py` (don't hand-roll terminators everywhere)
+- Formatting/sanitizing UI text: use `_sanitize_text()` and `_fmt_ms()` functions in `code.py`
+- BLE HID volume/mute: use `BleHid` class methods in `code.py` rather than inlining HID reports
 
 ## Common Pitfalls to Avoid
 1. Don’t declare `global` for read-only globals (flake8 will complain; also harms clarity).
 2. Don’t accept BM83 frames without checksum/length validation.
 3. Don’t block the event loop on UART reads; always handle timeouts/partial reads.
 4. Don’t send unsanitized strings to Nextion (quotes/CRLF/length can break commands).
-5. Don’t duplicate protocol constants/encoders across files—centralize in the relevant module.
+5. Don't duplicate protocol constants/encoders—keep them centralized within `code.py`.
 
 ## Boundaries / Files to Treat as Read-Only (unless explicitly requested)
 - `Documents/` (vendor datasheets, reference PDFs)
