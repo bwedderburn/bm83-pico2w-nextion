@@ -45,13 +45,12 @@ def load_code_module():
 def test_nextion_queue_uses_deque_and_preserves_order():
     code = load_code_module()
     uart = DummyUART()
-    nx = code.Nextion(uart)
+    nx = code.Nextion(uart, tx_interval_s=0, sendme_enabled=False)
 
     # Ensure we are using an efficient O(1) queue structure.
-    assert isinstance(nx._txq, deque)  # noqa: SLF001
+    assert nx.queue_is_deque
 
     # Enqueue a handful of commands and flush them through tick() calls.
-    nx._tx_interval_s = 0  # noqa: SLF001 - speed up for host testing
     cmds = [f"cmd{i}" for i in range(5)]
     for c in cmds:
         nx.enqueue(c)
