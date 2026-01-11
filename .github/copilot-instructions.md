@@ -19,15 +19,24 @@ Supporting modules live under:
   - Optional I²S DAC integration (e.g., UDA1334A), depending on firmware usage
 
 ## Code Structure (authoritative)
-All modules below are located in `firmware/circuitpython/`:
-- `code.py`: main runtime / event loop / orchestration
-- `bm83.py`: BM83 UART framing, parsing, AVRCP helpers, EQ syncing
-- `nextion.py`: Nextion protocol, token parsing, command queue, polling (`sendme`)
-- `ble_hid.py`: optional BLE HID ConsumerControl helper
-- `utils.py`: shared helpers like `sanitize_text()` and `fmt_ms()`
+**Current implementation**: All code is in a single monolithic file:
+- `firmware/circuitpython/code.py`: Contains all functionality including:
+  - Main runtime / event loop / orchestration
+  - `Bm83` class: BM83 UART framing, parsing, AVRCP helpers, EQ syncing
+  - `Nextion` class: Nextion protocol, token parsing, command queue, polling (`sendme`)
+  - `BleHid` class: optional BLE HID ConsumerControl helper
+  - Utility functions: `_sanitize_text()`, `_fmt_ms()`, etc.
+
+**Future modular structure** (referenced by tests but not yet implemented):
+- `bm83.py`: BM83 protocol handling
+- `nextion.py`: Nextion protocol handling
+- `ble_hid.py`: BLE HID functionality
+- `utils.py`: shared utility functions
 
 Tests:
 - `tests/`: unit tests run in CI (host Python)
+- `tests/test_code.py`: tests for monolithic `code.py` - tests pure-Python helpers like protocol parsing, text sanitization, and frame construction. Note: Some tests are aspirational and test functions not yet implemented (e.g., `hexdump()`, `bm83_frame()`), so full test suite may not pass.
+- `tests/test_modules.py`: tests for future modular structure - expects separate `utils.py`, `bm83.py`, `nextion.py` modules (currently failing due to missing modules)
 
 CI:
 - `.github/workflows/python-package.yml`: runs **flake8** and **pytest**
@@ -86,17 +95,17 @@ pytest -v
   - keep state machines explicit (especially play/pause timing and metadata updates)
 
 ## Common Operations (preferred entry points)
-- Sending BM83 commands: use the canonical send helper in `bm83.py` (don’t duplicate framing logic)
-- Updating Nextion UI: use the helper methods in `nextion.py` (don’t hand-roll terminators everywhere)
-- Formatting/sanitizing UI text: use `utils.py` helpers (`sanitize_text()`, etc.)
-- BLE HID volume/mute: use `ble_hid.py` helper rather than inlining HID reports
+- Sending BM83 commands: use the `Bm83.send()` method in `code.py` (don't duplicate framing logic)
+- Updating Nextion UI: use the `Nextion` class methods in `code.py` (don't hand-roll terminators everywhere)
+- Formatting/sanitizing UI text: use `_sanitize_text()` and `_fmt_ms()` functions in `code.py`
+- BLE HID volume/mute: use `BleHid` class methods in `code.py` rather than inlining HID reports
 
 ## Common Pitfalls to Avoid
 1. Don’t declare `global` for read-only globals (flake8 will complain; also harms clarity).
 2. Don’t accept BM83 frames without checksum/length validation.
 3. Don’t block the event loop on UART reads; always handle timeouts/partial reads.
 4. Don’t send unsanitized strings to Nextion (quotes/CRLF/length can break commands).
-5. Don’t duplicate protocol constants/encoders across files—centralize in the relevant module.
+5. Don't duplicate protocol constants/encoders—keep them centralized within `code.py`.
 
 ## Boundaries / Files to Treat as Read-Only (unless explicitly requested)
 - `Documents/` (vendor datasheets, reference PDFs)
@@ -104,9 +113,19 @@ pytest -v
 - `LICENSE`
 - `SECURITY.md`
 
+
+## Development Workflow
+When making changes to the firmware:
+1. **Understand the protocol first**: Review relevant documentation in `Documents/` for BM83 UART commands or Nextion display protocols
+2. **Lint early and often**: Run `flake8` after making changes to catch issues immediately
+3. **Test incrementally**: Run `pytest tests/test_code.py` to test pure-Python helpers (tests that work without CircuitPython hardware). Note: `tests/test_modules.py` will fail until the codebase is refactored into separate modules.
+4. **Manual testing on device**: CircuitPython code must ultimately be tested on actual ESP32-S3 hardware with connected peripherals
+5. **Keep changes small**: Focus on one protocol, one class, or one feature at a time
+6. **Document as you go**: Update inline comments and docstrings for any protocol parsing or state machine changes
+
 ## Acceptance Criteria for Changes
 - `flake8` passes (strict pass + style pass as in CI)
-- `pytest` passes
+- Existing passing tests continue to pass. Note: Some tests are aspirational (testing not-yet-implemented functions) and will fail until those functions are extracted from the monolithic structure.
 - Changes preserve protocol correctness and non-blocking behavior
 - If behavior changes, update `README.md` and/or inline docs where needed
 - New protocol parsing/encoding behavior should include unit tests where feasible
