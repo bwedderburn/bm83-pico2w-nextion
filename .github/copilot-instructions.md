@@ -35,7 +35,7 @@ Supporting modules live under:
 
 Tests:
 - `tests/`: unit tests run in CI (host Python)
-- `tests/test_code.py`: tests for monolithic `code.py` - tests pure-Python helpers like protocol parsing, text sanitization, and frame construction (currently working)
+- `tests/test_code.py`: tests for monolithic `code.py` - tests pure-Python helpers like protocol parsing, text sanitization, and frame construction. Note: Some tests are aspirational and test functions not yet implemented (e.g., `hexdump()`, `bm83_frame()`), so full test suite may not pass.
 - `tests/test_modules.py`: tests for future modular structure - expects separate `utils.py`, `bm83.py`, `nextion.py` modules (currently failing due to missing modules)
 
 CI:
@@ -125,7 +125,7 @@ When making changes to the firmware:
 
 ## Acceptance Criteria for Changes
 - `flake8` passes (strict pass + style pass as in CI)
-- `pytest tests/test_code.py` passes (note: `tests/test_modules.py` expected to fail until modular refactor)
+- Existing passing tests continue to pass. Note: Some tests are aspirational (testing not-yet-implemented functions) and will fail until those functions are extracted from the monolithic structure.
 - Changes preserve protocol correctness and non-blocking behavior
 - If behavior changes, update `README.md` and/or inline docs where needed
 - New protocol parsing/encoding behavior should include unit tests where feasible
