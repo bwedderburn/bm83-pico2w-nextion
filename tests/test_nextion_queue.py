@@ -59,5 +59,8 @@ def test_nextion_queue_uses_deque_and_preserves_order():
     for _ in cmds:
         nx.tick()
 
-    sent = [payload[:- len(code.TERM)] for payload in uart.writes]
+    sent = []
+    for payload in uart.writes:
+        assert payload.endswith(code.TERM)
+        sent.append(payload[: -len(code.TERM)])
     assert sent == [c.encode("ascii") for c in cmds]
