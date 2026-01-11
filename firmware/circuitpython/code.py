@@ -12,6 +12,7 @@
 # ===========================================================
 
 import gc
+from collections import deque
 import time
 import board
 import busio
@@ -94,17 +95,18 @@ def _fmt_ms(ms):
 
 # ---------------- Nextion ----------------
 class Nextion:
-    def __init__(self, uart):
+    def __init__(self, uart, tx_interval_s=0.035, sendme_enabled=True):
         self.uart = uart
         self._rx = bytearray()
 
         self.current_page = None
         self._last_sendme_at = 0.0
         self._sendme_period_s = 0.5
+        self._sendme_enabled = sendme_enabled
 
-        self._txq = []
+        self._txq = deque()
         self._last_tx_at = 0.0
-        self._tx_interval_s = 0.035
+        self._tx_interval_s = tx_interval_s
 
         self._last_token = None
         self._last_token_at = 0.0
@@ -123,6 +125,8 @@ class Nextion:
         self._txq.append(cmd)
 
     def sendme_tick(self):
+        if not self._sendme_enabled:
+            return
         now = time.monotonic()
         if (now - self._last_sendme_at) >= self._sendme_period_s:
             self._last_sendme_at = now
@@ -137,7 +141,7 @@ class Nextion:
         if (now - self._last_tx_at) < self._tx_interval_s:
             return
 
-        cmd = self._txq.pop(0)
+        cmd = self._txq.popleft()
         try:
             self.uart.write(cmd.encode("ascii", "replace") + TERM)
             self._last_tx_at = now
@@ -209,6 +213,10 @@ class Nextion:
     def set_text_active_page(self, obj, txt):
         safe = _sanitize_text(txt)
         self.enqueue('%s.txt="%s"' % (obj, safe))
+
+    @property
+    def queue_is_deque(self):
+        return isinstance(self._txq, deque)
 
 
 # ---------------- BLE HID ----------------
@@ -797,7 +805,5 @@ def main():
 
         time.sleep(0.005)
 
-
-main()
-
-
+if __name__ == "__main__":
+    main()
